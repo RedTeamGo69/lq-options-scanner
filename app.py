@@ -206,13 +206,17 @@ if ticker:
             st.warning("This expiration date is in the past. Select another date.")
         else:
             # Highlight danger if the expiration date happens after an earnings call!
+            # Highlight danger if the expiration date happens after an earnings call!
             if earnings_date != "N/A":
                 try:
-                    earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d")
-                    target_dt = datetime.strptime(target_date, "%Y-%m-%d")
-                    # If earnings is happening BEFORE the option expires, issue a warning
-                    if earn_dt <= target_dt:
-                        st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}, which is BEFORE this option expires. Expect heavy IV Crush.")
+                    earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+                    today_dt = datetime.today().date()
+                    
+                    # 1. Ignore "ghost" past earnings dates
+                    # 2. Trigger if you are holding THROUGH the earnings event
+                    if today_dt <= earn_dt <= target_dt:
+                        st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Because this option expires AFTER that date, you will be holding through the event. Expect heavy IV Crush.")
                 except Exception:
                     pass
 
