@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from scipy.stats import norm
-from datetime import datetime, timezone
+from datetime import datetime
 import streamlit as st
 import urllib.request
 import json
@@ -38,7 +38,7 @@ class BlackScholesCalculator:
         price = (self.K * math.exp(-self.r * self.T) * norm.cdf(-d2)) - (self.S * norm.cdf(-d1))
         return round(price, 2), round(norm.cdf(d1) - 1.0, 2)
 
-# --- DIRECT YAHOO API FUNCTIONS ---
+# --- DATA FUNCTIONS ---
 @st.cache_data(ttl=86400) 
 def get_company_name(ticker_symbol):
     try:
@@ -77,48 +77,25 @@ def get_event_metrics(ticker_symbol):
     return earnings_date, ex_div_date
 
 @st.cache_data(ttl=900) 
-def get_live_data_direct(ticker_symbol, lookback_days=90):
-    """Bypasses yfinance and hits the raw Yahoo backend to prevent cloud IP bans."""
+def get_live_data(ticker_symbol, lookback_days=90):
     try:
-        # 1. Direct API call for Spot Price and Expiration Dates
-        url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        stock = yf.Ticker(ticker_symbol)
+        hist = stock.history(period=f"{lookback_days}d")
+        if hist.empty: return "EMPTY", None, None
         
-        with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode())
-            result = data['optionChain']['result'][0]
-            
-            current_price = result['quote']['regularMarketPrice']
-            exp_timestamps = result.get('expirationDates', [])
-            
-            # Convert Unix timestamps to YYYY-MM-DD
-            options_dates = [datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d') for ts in exp_timestamps]
-            
-            # 2. Grab Historical Volatility 
-            stock = yf.Ticker(ticker_symbol)
-            hist = stock.history(period=f"{lookback_days}d")
-            sigma = 0.30 # Default fallback
-            if not hist.empty:
-                hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
-                sigma = hist['Log_Return'].std() * np.sqrt(252)
-
-            return current_price, sigma, options_dates, exp_timestamps
-            
-    except Exception:
-        return "ERROR", None, None, None
-
-def fetch_direct_options_chain(ticker, unix_timestamp):
-    """Pulls the specific options chain directly from Yahoo's backend."""
-    url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={unix_timestamp}"
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-    
-    with urllib.request.urlopen(req, timeout=5) as response:
-        data = json.loads(response.read().decode())
-        options = data['optionChain']['result'][0]['options'][0]
+        current_price = hist['Close'].iloc[-1]
+        hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
+        sigma = hist['Log_Return'].std() * np.sqrt(252)
         
-        calls = pd.DataFrame(options.get('calls', []))
-        puts = pd.DataFrame(options.get('puts', []))
-        return calls, puts
+        # This will now only fire ONCE because of the form button
+        options_dates = stock.options 
+        
+        return current_price, sigma, options_dates
+        
+    except Exception as e:
+        if "RateLimit" in str(type(e).__name__) or "429" in str(e):
+            return "RATE_LIMIT", None, None
+        return "ERROR", None, None
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
@@ -162,12 +139,14 @@ def style_dataframe(df, hv):
 st.title("📈 LQ Quant Options Scanner")
 st.markdown("Identify mathematical edge via Black-Scholes pricing.")
 
+# Trading controls sit outside the form so they don't trigger API calls
 col1, col2 = st.columns(2)
 with col1:
     action = st.radio("Action:", ["SELL", "BUY"], horizontal=True)
 with col2:
     opt_type = st.radio("Type:", ["PUTS", "CALLS"], horizontal=True)
 
+# The Safety Catch Form
 with st.form("search_form"):
     ticker_input = st.text_input("Enter Ticker Symbol:", value="").strip().upper()
     submit_search = st.form_submit_button("Fetch Options Data", type="primary", use_container_width=True)
@@ -180,10 +159,12 @@ elif submit_search and not ticker_input:
 if 'active_ticker' in st.session_state:
     ticker = st.session_state['active_ticker']
     
-    with st.spinner(f"Pulling raw data for {ticker}..."):
-        S, sigma, options_dates, exp_timestamps = get_live_data_direct(ticker)
+    with st.spinner(f"Pulling live data for {ticker}..."):
+        S, sigma, options_dates = get_live_data(ticker)
         
-    if S == "ERROR":
+    if S == "RATE_LIMIT":
+        st.warning("⚠️ **Yahoo Rate Limit Hit:** Please wait 60 seconds before fetching data again.")
+    elif S == "EMPTY" or S == "ERROR":
         st.error(f"Could not find valid data for {ticker}. Please check the symbol.")
     elif not options_dates:
         st.error(f"No options available for {ticker}.")
@@ -212,7 +193,7 @@ if 'active_ticker' in st.session_state:
         
         dte = (datetime.strptime(target_date, "%Y-%m-%d").date() - datetime.today().date()).days
         if dte <= 0:
-            st.warning("This expiration date is in the past or expires today. Select a future date.")
+            st.warning("This expiration date is in the past. Select a future date.")
         else:
             if earnings_date != "N/A":
                 try:
@@ -241,13 +222,10 @@ if 'active_ticker' in st.session_state:
                     T = dte / 365.0 
                     
                     try:
-                        # Match the selected date to the exact Unix timestamp Yahoo expects
-                        date_index = options_dates.index(target_date)
-                        target_unix = exp_timestamps[date_index]
+                        stock_obj = yf.Ticker(ticker)
+                        chain = stock_obj.option_chain(target_date)
                         
-                        # Fetch the direct chain!
-                        calls_df, puts_df = fetch_direct_options_chain(ticker, target_unix)
-                        target_chain = puts_df if opt_type == 'PUTS' else calls_df
+                        target_chain = chain.puts if opt_type == 'PUTS' else chain.calls
                         
                         if not target_chain.empty:
                             target_chain = target_chain.fillna(0)
@@ -323,4 +301,7 @@ if 'active_ticker' in st.session_state:
                             st.warning("No options chain returned for this date.")
                             
                     except Exception as e:
-                        st.error(f"Error crunching data: {e}")
+                        if "RateLimit" in str(type(e).__name__) or "429" in str(e):
+                            st.warning("⚠️ **Yahoo Rate Limit Hit:** Please wait 60 seconds before scanning the chain.")
+                        else:
+                            st.error(f"Error crunching data: {e}")
