@@ -109,8 +109,8 @@ def get_risk_free_rate():
     except Exception: pass
     return 0.045 
 
-def get_raw_moneyness(S, K, opt_type):
-    if abs(S - K) / S <= 0.015: return "ATM"
+def get_raw_moneyness(S, K, opt_type, closest_strike):
+    if K == closest_strike: return "ATM"
     if opt_type == 'P': return "ITM" if K > S else "OTM"
     else: return "ITM" if K < S else "OTM"
 
@@ -227,6 +227,9 @@ if ticker:
                     target_chain = target_chain.fillna(0)
                     price_col = 'ask' if action == 'BUY' else 'bid'
                     
+                    # NEW: Find the single exact strike price closest to the live stock price (S)
+                    closest_strike = min(target_chain['strike'].tolist(), key=lambda x: abs(x - S))
+                    
                     for _, row in target_chain.iterrows():
                         strike, market_price, oi, vol, iv = row['strike'], row[price_col], row['openInterest'], row['volume'], row['impliedVolatility']
                         
@@ -245,7 +248,8 @@ if ticker:
                         edge_pct = (edge / market_price * 100) if market_price > 0 else 0
                         
                         row_data = {
-                            'Moneyness': get_raw_moneyness(S, strike, opt_type[0]),
+                            # NEW: Pass the closest_strike into the moneyness function
+                            'Moneyness': get_raw_moneyness(S, strike, opt_type[0], closest_strike),
                             'Strike': strike,
                             'Delta': delta,
                             'Price': market_price,
