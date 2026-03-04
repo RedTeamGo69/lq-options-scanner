@@ -59,31 +59,51 @@ def get_company_name(ticker_symbol):
 def get_event_metrics(ticker_symbol):
     earnings_date = "N/A"
     div_yield = "N/A"
+    
     try:
-        # Sneak past the rate limit again using the exact endpoints
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker_symbol}?modules=calendarEvents,summaryDetail"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            data = json.loads(response.read().decode())
-            result = data.get('quoteSummary', {}).get('result', [])
-            if result and result[0]:
-                cal_events = result[0].get('calendarEvents', {})
-                earnings = cal_events.get('earnings', {}).get('earningsDate', [])
-                if earnings and len(earnings) > 0:
-                    earnings_date = earnings[0].get('fmt', 'N/A')
+        stock = yf.Ticker(ticker_symbol)
+        
+        # --- 1. THE EARNINGS FIX ---
+        try:
+            # yfinance's built-in calendar handles the anti-bot cookies automatically
+            cal = stock.calendar
+            if isinstance(cal, dict) and 'Earnings Date' in cal:
+                dates = cal['Earnings Date']
+                if dates:
+                    # Grab the first upcoming date
+                    earnings_date = dates[0].strftime('%Y-%m-%d')
+        except Exception:
+            pass
+            
+        # --- 2. THE DIVIDEND FIX (Math instead of Scraping) ---
+        try:
+            hist = stock.history(period="1y")
+            divs = stock.dividends
+            
+            if not hist.empty and not divs.empty:
+                current_price = hist['Close'].iloc[-1]
                 
-                summary = result[0].get('summaryDetail', {})
-                div_dict = summary.get('dividendYield', {})
-                if div_dict and div_dict.get('fmt'):
-                    div_yield = div_dict.get('fmt')
+                # Safely remove timezones to compare dates without crashing
+                divs.index = divs.index.tz_localize(None)
+                one_year_ago = pd.Timestamp.now().tz_localize(None) - pd.DateOffset(years=1)
+                
+                # Sum all dividends paid out over the last 365 days
+                recent_divs = divs[divs.index >= one_year_ago]
+                
+                if not recent_divs.empty:
+                    total_div = recent_divs.sum()
+                    yield_pct = (total_div / current_price) * 100
+                    div_yield = f"{yield_pct:.2f}%"
                 else:
-                    trail_dict = summary.get('trailingAnnualDividendYield', {})
-                    if trail_dict and trail_dict.get('fmt'):
-                        div_yield = trail_dict.get('fmt')
-                    else:
-                        div_yield = "0.00%"
+                    div_yield = "0.00%"
+            elif not hist.empty:
+                 div_yield = "0.00%"
+        except Exception:
+            pass
+            
     except Exception:
         pass
+        
     return earnings_date, div_yield
 
 @st.cache_data(ttl=900) 
