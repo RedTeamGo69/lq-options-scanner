@@ -1,0 +1,205 @@
+import math
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from scipy.stats import norm
+from datetime import datetime
+import streamlit as st
+
+# --- STREAMLIT PAGE CONFIG ---
+st.set_page_config(page_title="LQ Quant Options Scanner", page_icon="📈", layout="centered")
+
+# --- CORE MATH CLASS ---
+class BlackScholesCalculator:
+    def __init__(self, S, K, T, r, sigma):
+        self.S = float(S)
+        self.K = float(K)
+        self.T = float(T)
+        self.r = float(r)
+        self.sigma = max(float(sigma), 0.0001) # Volatility Floor
+
+    def _get_d1_d2(self):
+        if self.T <= 0: return 0.0, 0.0
+        d1 = (math.log(self.S / self.K) + (self.r + (self.sigma ** 2) / 2) * self.T) / (self.sigma * math.sqrt(self.T))
+        d2 = d1 - self.sigma * math.sqrt(self.T)
+        return d1, d2
+
+    def get_call_data(self):
+        if self.T <= 0: return max(0.0, self.S - self.K), 1.0 if self.S > self.K else 0.0
+        d1, d2 = self._get_d1_d2()
+        price = (self.S * norm.cdf(d1)) - (self.K * math.exp(-self.r * self.T) * norm.cdf(d2))
+        return round(price, 2), round(norm.cdf(d1), 2)
+
+    def get_put_data(self):
+        if self.T <= 0: return max(0.0, self.K - self.S), -1.0 if self.S < self.K else 0.0
+        d1, d2 = self._get_d1_d2()
+        price = (self.K * math.exp(-self.r * self.T) * norm.cdf(-d2)) - (self.S * norm.cdf(-d1))
+        return round(price, 2), round(norm.cdf(d1) - 1.0, 2)
+
+# --- DATA FUNCTIONS ---
+@st.cache_data(ttl=900) 
+def get_live_data(ticker_symbol, lookback_days=90):
+    stock = yf.Ticker(ticker_symbol)
+    hist = stock.history(period=f"{lookback_days}d")
+    if hist.empty: return None, None, None, None
+    
+    current_price = hist['Close'].iloc[-1]
+    hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
+    sigma = hist['Log_Return'].std() * np.sqrt(252)
+    
+    # Safely fetch the official company name
+    company_name = stock.info.get('longName', ticker_symbol)
+    
+    return current_price, sigma, stock.options, company_name
+
+@st.cache_data(ttl=3600)
+def get_risk_free_rate():
+    try:
+        irx = yf.Ticker("^IRX")
+        hist = irx.history(period="5d")
+        if not hist.empty: return hist['Close'].iloc[-1] / 100.0
+    except Exception: pass
+    return 0.045 
+
+def get_raw_moneyness(S, K, opt_type):
+    if abs(S - K) / S <= 0.015: return "ATM"
+    if opt_type == 'P': return "ITM" if K > S else "OTM"
+    else: return "ITM" if K < S else "OTM"
+
+# --- PANDAS STYLING FOR MOBILE UI ---
+def style_dataframe(df, hv):
+    def highlight_moneyness(val):
+        if val == 'OTM': return 'color: #00FF00; font-weight: bold'
+        elif val == 'ITM': return 'color: #FF4B4B; font-weight: bold'
+        else: return 'color: #FFD700; font-weight: bold'
+        
+    def highlight_edge(val):
+        if val > 0: return 'color: #00FF00'
+        elif val < 0: return 'color: #FF4B4B'
+        return ''
+
+    def highlight_iv(val):
+        if hv == 0: return ''
+        ratio = (val / 100.0) / hv
+        if ratio >= 1.5: return 'color: #FF4B4B; font-weight: bold' 
+        elif ratio <= 0.8: return 'color: #00FFFF; font-weight: bold' 
+        return ''
+
+    styled_df = df.style.map(highlight_moneyness, subset=['Moneyness']) \
+                        .map(highlight_edge, subset=['Edge (%)']) \
+                        .map(highlight_iv, subset=['IV (%)']) \
+                        .format(precision=2)
+    return styled_df
+
+# --- MAIN APP UI ---
+st.title("📈 LQ Quant Options Scanner")
+st.markdown("Identify mathematical edge via Black-Scholes pricing.")
+
+col1, col2 = st.columns(2)
+with col1:
+    action = st.radio("Action:", ["SELL", "BUY"], horizontal=True)
+with col2:
+    opt_type = st.radio("Type:", ["PUTS", "CALLS"], horizontal=True)
+
+ticker = st.text_input("Enter Ticker Symbol:", value="").strip().upper()
+
+if ticker:
+    with st.spinner(f"Pulling data for {ticker}..."):
+        S, sigma, options_dates, company_name = get_live_data(ticker)
+        r = get_risk_free_rate()
+
+    if S is None:
+        st.error(f"Could not find data for {ticker}. Please check the symbol.")
+    elif not options_dates:
+        st.error(f"No options available for {ticker}.")
+    else:
+        # Display the full company name for verification
+        st.subheader(f"{company_name} ({ticker})")
+        
+        st.divider()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Live Price", f"${S:.2f}")
+        m2.metric("Hist. Volatility", f"{sigma*100:.1f}%")
+        m3.metric("Risk-Free Rate", f"{r*100:.2f}%")
+
+        target_date = st.selectbox("Select Expiration Date:", options_dates)
+        
+        dte = (datetime.strptime(target_date, "%Y-%m-%d") - datetime.today()).days
+        if dte <= 0:
+            st.warning("This expiration date is in the past. Select another date.")
+        else:
+            # Updated to width="stretch" to clear the warning
+            run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
+            
+            if run_scan:
+                with st.spinner("Crunching Black-Scholes model..."):
+                    T = dte / 365.0 
+                    stock_obj = yf.Ticker(ticker)
+                    chain = stock_obj.option_chain(target_date)
+                    
+                    MIN_OPEN_INTEREST = 50
+                    MIN_VOLUME = 10
+                    MIN_ABS_DELTA = 0.15 
+                    
+                    results = []
+                    target_chain = chain.puts if opt_type == 'PUTS' else chain.calls
+                    target_chain = target_chain.fillna(0)
+                    price_col = 'ask' if action == 'BUY' else 'bid'
+                    
+                    for _, row in target_chain.iterrows():
+                        strike, market_price, oi, vol, iv = row['strike'], row[price_col], row['openInterest'], row['volume'], row['impliedVolatility']
+                        
+                        if market_price == 0 or oi < MIN_OPEN_INTEREST or vol < MIN_VOLUME: continue 
+                            
+                        calc = BlackScholesCalculator(S, strike, T, r, sigma)
+                        fair_value, delta = calc.get_put_data() if opt_type == 'PUTS' else calc.get_call_data()
+                            
+                        if abs(delta) < MIN_ABS_DELTA: continue
+                            
+                        if action == 'BUY':
+                            edge = fair_value - market_price
+                        else:
+                            edge = market_price - fair_value
+                            
+                        edge_pct = (edge / market_price * 100) if market_price > 0 else 0
+                        
+                        row_data = {
+                            'Moneyness': get_raw_moneyness(S, strike, opt_type[0]),
+                            'Strike': strike,
+                            'Delta': delta,
+                            'Price': market_price,
+                            'Fair Val': round(fair_value, 2),
+                            'Edge (%)': round(edge_pct, 1),
+                            'IV (%)': round(iv * 100, 1),
+                            'Vol': int(vol),
+                            'OI': int(oi)
+                        }
+                        
+                        if action == 'SELL':
+                            ann_roc = (market_price / strike) * 100 * (365 / dte) if dte > 0 else 0
+                            row_data['Ann.ROC (%)'] = round(ann_roc, 1)
+                            
+                        results.append(row_data)
+
+                    df = pd.DataFrame(results)
+                    
+                    if not df.empty:
+                        best_setups = df.sort_values(by='Edge (%)', ascending=False).head(20)
+                        
+                        st.subheader(f"Top Setups ({dte} DTE)")
+                        
+                        styled_df = style_dataframe(best_setups, sigma)
+                        # Updated to width="stretch"
+                        st.dataframe(styled_df, width="stretch", hide_index=True)
+                        
+                        csv = best_setups.to_csv(index=False).encode('utf-8')
+                        # Updated to width="stretch"
+                        st.download_button(
+                            label="📥 Download Clean CSV",
+                            data=csv,
+                            file_name=f"{ticker}_{action}_{opt_type}_{target_date}.csv",
+                            mime="text/csv",
+                            width="stretch"
+                        )
+                    else:
+                        st.warning("No liquid, viable contracts found for that date.")
