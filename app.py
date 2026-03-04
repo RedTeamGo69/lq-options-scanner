@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 from scipy.stats import norm
 from datetime import datetime
+import pytz
 import streamlit as st
 import urllib.request
 import json
@@ -134,8 +135,11 @@ def style_dataframe(df, hv):
                         .format(precision=2)
     return styled_df
 
+# --- NEW TIMEZONE HELPER ---
 def format_date_dropdown(date_str):
-    days_to_exp = (datetime.strptime(date_str, "%Y-%m-%d").date() - datetime.today().date()).days
+    ny_tz = pytz.timezone('America/New_York')
+    today_ny = datetime.now(ny_tz).date()
+    days_to_exp = (datetime.strptime(date_str, "%Y-%m-%d").date() - today_ny).days
     return f"{date_str} ({days_to_exp} DTE)"
 
 # --- MAIN APP UI ---
@@ -196,7 +200,11 @@ if 'active_ticker' in st.session_state:
             format_func=format_date_dropdown
         )
         
-        dte = (datetime.strptime(target_date, "%Y-%m-%d").date() - datetime.today().date()).days
+        # Lock DTE to New York Time
+        ny_tz = pytz.timezone('America/New_York')
+        today_ny = datetime.now(ny_tz).date()
+        dte = (datetime.strptime(target_date, "%Y-%m-%d").date() - today_ny).days
+        
         if dte <= 0:
             st.warning("This expiration date is in the past or expires today. Select a future date.")
         else:
@@ -204,9 +212,8 @@ if 'active_ticker' in st.session_state:
                 try:
                     earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
                     target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-                    today_dt = datetime.today().date()
                     
-                    if today_dt <= earn_dt <= target_dt:
+                    if today_ny <= earn_dt <= target_dt:
                         st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Expect heavy IV Crush.")
                 except Exception: pass
             
@@ -214,9 +221,8 @@ if 'active_ticker' in st.session_state:
                 try:
                     ex_dt = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
                     target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-                    today_dt = datetime.today().date()
                     
-                    if today_dt <= ex_dt <= target_dt:
+                    if today_ny <= ex_dt <= target_dt:
                         st.warning(f"⚠️ **Dividend Risk:** The Ex-Dividend date is {ex_div_date}. The stock price will mechanically drop.")
                 except Exception: pass
 
@@ -239,7 +245,7 @@ if 'active_ticker' in st.session_state:
                             MIN_OPEN_INTEREST = 50
                             MIN_VOLUME = 10
                             MIN_ABS_DELTA = 0.15 
-                            MAX_ABS_DELTA = 0.80  # <-- NEW: Blocks Deep ITM mirages 
+                            MAX_ABS_DELTA = 0.80 
                             
                             results = []
                             closest_strike = min(target_chain['strike'].tolist(), key=lambda x: abs(x - S))
@@ -288,7 +294,6 @@ if 'active_ticker' in st.session_state:
                             if not df.empty:
                                 best_setups = df.sort_values(by='Edge (%)', ascending=False).head(20)
                                 
-                                # NEW HEADER TEXT: Formats the string dynamically
                                 action_word = "Buying" if action == 'BUY' else "Selling"
                                 type_word = "Puts" if opt_type == 'PUTS' else "Calls"
                                 st.subheader(f"Top Contracts for {action_word} {type_word} | {target_date} ({dte} DTE)")
