@@ -58,53 +58,35 @@ def get_company_name(ticker_symbol):
 @st.cache_data(ttl=86400)
 def get_event_metrics(ticker_symbol):
     earnings_date = "N/A"
-    div_yield = "N/A"
+    ex_div_date = "N/A"
     
     try:
         stock = yf.Ticker(ticker_symbol)
         
-        # --- 1. THE EARNINGS FIX ---
         try:
             # yfinance's built-in calendar handles the anti-bot cookies automatically
             cal = stock.calendar
-            if isinstance(cal, dict) and 'Earnings Date' in cal:
-                dates = cal['Earnings Date']
-                if dates:
-                    # Grab the first upcoming date
-                    earnings_date = dates[0].strftime('%Y-%m-%d')
-        except Exception:
-            pass
-            
-        # --- 2. THE DIVIDEND FIX (Math instead of Scraping) ---
-        try:
-            hist = stock.history(period="1y")
-            divs = stock.dividends
-            
-            if not hist.empty and not divs.empty:
-                current_price = hist['Close'].iloc[-1]
+            if isinstance(cal, dict):
+                # 1. Grab Earnings
+                if 'Earnings Date' in cal and cal['Earnings Date']:
+                    earnings_date = cal['Earnings Date'][0].strftime('%Y-%m-%d')
                 
-                # Safely remove timezones to compare dates without crashing
-                divs.index = divs.index.tz_localize(None)
-                one_year_ago = pd.Timestamp.now().tz_localize(None) - pd.DateOffset(years=1)
-                
-                # Sum all dividends paid out over the last 365 days
-                recent_divs = divs[divs.index >= one_year_ago]
-                
-                if not recent_divs.empty:
-                    total_div = recent_divs.sum()
-                    yield_pct = (total_div / current_price) * 100
-                    div_yield = f"{yield_pct:.2f}%"
-                else:
-                    div_yield = "0.00%"
-            elif not hist.empty:
-                 div_yield = "0.00%"
+                # 2. Grab Ex-Dividend Date
+                if 'Ex-Dividend Date' in cal and cal['Ex-Dividend Date']:
+                    ex_div_date = cal['Ex-Dividend Date'].strftime('%Y-%m-%d')
+            # Fallback for DataFrame calendar format (sometimes yfinance shifts formats)
+            elif isinstance(cal, pd.DataFrame):
+                if 'Earnings Date' in cal.index:
+                    earnings_date = cal.loc['Earnings Date'].iloc[0].strftime('%Y-%m-%d')
+                if 'Ex-Dividend Date' in cal.index:
+                    ex_div_date = cal.loc['Ex-Dividend Date'].iloc[0].strftime('%Y-%m-%d')
         except Exception:
             pass
             
     except Exception:
         pass
         
-    return earnings_date, div_yield
+    return earnings_date, ex_div_date
 
 @st.cache_data(ttl=900) 
 def get_live_data(ticker_symbol, lookback_days=90):
@@ -173,14 +155,14 @@ if ticker:
     with st.spinner(f"Pulling data for {ticker}..."):
         S, sigma, options_dates = get_live_data(ticker)
         r = get_risk_free_rate()
-        # Fetch our new metrics!
-        earnings_date, div_yield = get_event_metrics(ticker)
+        earnings_date, ex_div_date = get_event_metrics(ticker)
 
     if S is None:
         st.error(f"Could not find data for {ticker}. Please check the symbol.")
     elif not options_dates:
         st.error(f"No options available for {ticker}.")
     else:
+        # Get the clean company name and handle redundant formats
         company_name = get_company_name(ticker)
         if company_name.upper() == ticker.upper():
             st.subheader(f"{ticker}")
@@ -189,14 +171,13 @@ if ticker:
         
         st.divider()
         
-        # We split the metrics into two rows so they don't get squished on an iPhone
         m1, m2 = st.columns(2)
         m1.metric("Live Price", f"${S:.2f}")
         m2.metric("Hist. Volatility", f"{sigma*100:.1f}%")
         
         m3, m4, m5 = st.columns(3)
         m3.metric("Next Earnings", earnings_date)
-        m4.metric("Div Yield", div_yield)
+        m4.metric("Ex-Div Date", ex_div_date)
         m5.metric("Risk-Free", f"{r*100:.1f}%")
 
         target_date = st.selectbox("Select Expiration Date:", options_dates)
@@ -205,18 +186,27 @@ if ticker:
         if dte <= 0:
             st.warning("This expiration date is in the past. Select another date.")
         else:
-            # Highlight danger if the expiration date happens after an earnings call!
-            # Highlight danger if the expiration date happens after an earnings call!
+            # Highlight danger if holding through an Earnings Call!
             if earnings_date != "N/A":
                 try:
                     earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
                     target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
                     today_dt = datetime.today().date()
                     
-                    # 1. Ignore "ghost" past earnings dates
-                    # 2. Trigger if you are holding THROUGH the earnings event
                     if today_dt <= earn_dt <= target_dt:
                         st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Because this option expires AFTER that date, you will be holding through the event. Expect heavy IV Crush.")
+                except Exception:
+                    pass
+            
+            # Highlight danger if holding through an Ex-Dividend Date!
+            if ex_div_date != "N/A":
+                try:
+                    ex_dt = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+                    today_dt = datetime.today().date()
+                    
+                    if today_dt <= ex_dt <= target_dt:
+                        st.warning(f"⚠️ **Dividend Risk:** The Ex-Dividend date is {ex_div_date}. The stock price will mechanically drop on this day, artificially pushing puts closer to being In-The-Money.")
                 except Exception:
                     pass
 
