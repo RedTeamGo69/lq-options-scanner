@@ -125,8 +125,12 @@ def get_live_data(ticker_symbol, lookback_days=90):
             current_price = hist['Close'].iloc[-1]
 
         # Dividend yield for Merton model (requires full info call)
+        # Yahoo sometimes returns yield as a whole number (e.g. 4.01 meaning 4.01%)
+        # instead of decimal form (0.0401). Detect and convert.
         try:
             div_yield = stock.info.get('dividendYield', 0.0) or 0.0
+            if div_yield > 1.0:
+                div_yield = div_yield / 100.0
         except Exception:
             div_yield = 0.0
 
