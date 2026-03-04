@@ -308,7 +308,7 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
         expected_move = S * sigma * math.sqrt(T)
         em1, em2 = st.columns(2)
         em1.metric("Expected Move (1σ)", f"± ${expected_move:.2f}")
-        em2.markdown(f"**Expected Range**  \n### ${S - expected_move:.2f} — ${S + expected_move:.2f}")
+        em2.markdown(f"**Expected Range**  \n### {S - expected_move:.2f} — {S + expected_move:.2f}")
 
     run_scan = st.button("Scan Options Chain", width="stretch", type="primary", key=f"scan_{key_suffix}")
 
