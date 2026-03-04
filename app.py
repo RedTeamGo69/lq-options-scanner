@@ -5,6 +5,8 @@ import yfinance as yf
 from scipy.stats import norm
 from datetime import datetime
 import streamlit as st
+import urllib.request
+import json
 
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(page_title="LQ Quant Options Scanner", page_icon="📈", layout="centered")
@@ -16,7 +18,7 @@ class BlackScholesCalculator:
         self.K = float(K)
         self.T = float(T)
         self.r = float(r)
-        self.sigma = max(float(sigma), 0.0001) # Volatility Floor
+        self.sigma = max(float(sigma), 0.0001) 
 
     def _get_d1_d2(self):
         if self.T <= 0: return 0.0, 0.0
@@ -37,21 +39,34 @@ class BlackScholesCalculator:
         return round(price, 2), round(norm.cdf(d1) - 1.0, 2)
 
 # --- DATA FUNCTIONS ---
+@st.cache_data(ttl=86400) # Caches for 24 hours to keep things lightning fast
+def get_company_name(ticker_symbol):
+    try:
+        # Pings Yahoo's lightweight autocomplete search bar instead of the heavy info scraper
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker_symbol}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            quotes = data.get('quotes', [])
+            if quotes:
+                name = quotes[0].get('longname') or quotes[0].get('shortname')
+                if name:
+                    return name
+    except Exception:
+        pass
+    return ticker_symbol
+
 @st.cache_data(ttl=900) 
 def get_live_data(ticker_symbol, lookback_days=90):
     stock = yf.Ticker(ticker_symbol)
     hist = stock.history(period=f"{lookback_days}d")
-    if hist.empty: return None, None, None, None
+    if hist.empty: return None, None, None
     
     current_price = hist['Close'].iloc[-1]
     hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
     sigma = hist['Log_Return'].std() * np.sqrt(252)
     
-    # Removed the stock.info call that causes the cloud crash
-    # Just passing the ticker symbol back to keep the UI from breaking
-    company_name = ticker_symbol 
-    
-    return current_price, sigma, stock.options, company_name
+    return current_price, sigma, stock.options
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
@@ -106,7 +121,7 @@ ticker = st.text_input("Enter Ticker Symbol:", value="").strip().upper()
 
 if ticker:
     with st.spinner(f"Pulling data for {ticker}..."):
-        S, sigma, options_dates, company_name = get_live_data(ticker)
+        S, sigma, options_dates = get_live_data(ticker)
         r = get_risk_free_rate()
 
     if S is None:
@@ -114,8 +129,12 @@ if ticker:
     elif not options_dates:
         st.error(f"No options available for {ticker}.")
     else:
-        # Display the full company name for verification
-        st.subheader(f"{company_name} ({ticker})")
+        # Get the clean company name and handle redundant formats
+        company_name = get_company_name(ticker)
+        if company_name.upper() == ticker.upper():
+            st.subheader(f"{ticker}")
+        else:
+            st.subheader(f"{company_name} ({ticker})")
         
         st.divider()
         m1, m2, m3 = st.columns(3)
@@ -129,7 +148,6 @@ if ticker:
         if dte <= 0:
             st.warning("This expiration date is in the past. Select another date.")
         else:
-            # Updated to width="stretch" to clear the warning
             run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
             
             if run_scan:
@@ -190,11 +208,9 @@ if ticker:
                         st.subheader(f"Top Setups ({dte} DTE)")
                         
                         styled_df = style_dataframe(best_setups, sigma)
-                        # Updated to width="stretch"
                         st.dataframe(styled_df, width="stretch", hide_index=True)
                         
                         csv = best_setups.to_csv(index=False).encode('utf-8')
-                        # Updated to width="stretch"
                         st.download_button(
                             label="📥 Download Clean CSV",
                             data=csv,
