@@ -39,10 +39,9 @@ class BlackScholesCalculator:
         return round(price, 2), round(norm.cdf(d1) - 1.0, 2)
 
 # --- DATA FUNCTIONS ---
-@st.cache_data(ttl=86400) # Caches for 24 hours to keep things lightning fast
+@st.cache_data(ttl=86400) 
 def get_company_name(ticker_symbol):
     try:
-        # Pings Yahoo's lightweight autocomplete search bar instead of the heavy info scraper
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker_symbol}"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=3) as response:
@@ -55,6 +54,37 @@ def get_company_name(ticker_symbol):
     except Exception:
         pass
     return ticker_symbol
+
+@st.cache_data(ttl=86400)
+def get_event_metrics(ticker_symbol):
+    earnings_date = "N/A"
+    div_yield = "N/A"
+    try:
+        # Sneak past the rate limit again using the exact endpoints
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker_symbol}?modules=calendarEvents,summaryDetail"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            result = data.get('quoteSummary', {}).get('result', [])
+            if result and result[0]:
+                cal_events = result[0].get('calendarEvents', {})
+                earnings = cal_events.get('earnings', {}).get('earningsDate', [])
+                if earnings and len(earnings) > 0:
+                    earnings_date = earnings[0].get('fmt', 'N/A')
+                
+                summary = result[0].get('summaryDetail', {})
+                div_dict = summary.get('dividendYield', {})
+                if div_dict and div_dict.get('fmt'):
+                    div_yield = div_dict.get('fmt')
+                else:
+                    trail_dict = summary.get('trailingAnnualDividendYield', {})
+                    if trail_dict and trail_dict.get('fmt'):
+                        div_yield = trail_dict.get('fmt')
+                    else:
+                        div_yield = "0.00%"
+    except Exception:
+        pass
+    return earnings_date, div_yield
 
 @st.cache_data(ttl=900) 
 def get_live_data(ticker_symbol, lookback_days=90):
@@ -123,13 +153,14 @@ if ticker:
     with st.spinner(f"Pulling data for {ticker}..."):
         S, sigma, options_dates = get_live_data(ticker)
         r = get_risk_free_rate()
+        # Fetch our new metrics!
+        earnings_date, div_yield = get_event_metrics(ticker)
 
     if S is None:
         st.error(f"Could not find data for {ticker}. Please check the symbol.")
     elif not options_dates:
         st.error(f"No options available for {ticker}.")
     else:
-        # Get the clean company name and handle redundant formats
         company_name = get_company_name(ticker)
         if company_name.upper() == ticker.upper():
             st.subheader(f"{ticker}")
@@ -137,10 +168,16 @@ if ticker:
             st.subheader(f"{company_name} ({ticker})")
         
         st.divider()
-        m1, m2, m3 = st.columns(3)
+        
+        # We split the metrics into two rows so they don't get squished on an iPhone
+        m1, m2 = st.columns(2)
         m1.metric("Live Price", f"${S:.2f}")
         m2.metric("Hist. Volatility", f"{sigma*100:.1f}%")
-        m3.metric("Risk-Free Rate", f"{r*100:.2f}%")
+        
+        m3, m4, m5 = st.columns(3)
+        m3.metric("Next Earnings", earnings_date)
+        m4.metric("Div Yield", div_yield)
+        m5.metric("Risk-Free", f"{r*100:.1f}%")
 
         target_date = st.selectbox("Select Expiration Date:", options_dates)
         
@@ -148,6 +185,17 @@ if ticker:
         if dte <= 0:
             st.warning("This expiration date is in the past. Select another date.")
         else:
+            # Highlight danger if the expiration date happens after an earnings call!
+            if earnings_date != "N/A":
+                try:
+                    earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d")
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+                    # If earnings is happening BEFORE the option expires, issue a warning
+                    if earn_dt <= target_dt:
+                        st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}, which is BEFORE this option expires. Expect heavy IV Crush.")
+                except Exception:
+                    pass
+
             run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
             
             if run_scan:
