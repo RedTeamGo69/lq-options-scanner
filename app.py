@@ -87,7 +87,6 @@ def get_live_data(ticker_symbol, lookback_days=90):
         hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
         sigma = hist['Log_Return'].std() * np.sqrt(252)
         
-        # This will now only fire ONCE because of the form button
         options_dates = stock.options 
         
         return current_price, sigma, options_dates
@@ -135,18 +134,22 @@ def style_dataframe(df, hv):
                         .format(precision=2)
     return styled_df
 
+# --- NEW HELPER FOR DROPDOWN ---
+def format_date_dropdown(date_str):
+    """Calculates DTE for the dropdown menu display without breaking the underlying string."""
+    days_to_exp = (datetime.strptime(date_str, "%Y-%m-%d").date() - datetime.today().date()).days
+    return f"{date_str} ({days_to_exp} DTE)"
+
 # --- MAIN APP UI ---
 st.title("📈 LQ Quant Options Scanner")
 st.markdown("Identify mathematical edge via Black-Scholes pricing.")
 
-# Trading controls sit outside the form so they don't trigger API calls
 col1, col2 = st.columns(2)
 with col1:
     action = st.radio("Action:", ["SELL", "BUY"], horizontal=True)
 with col2:
     opt_type = st.radio("Type:", ["PUTS", "CALLS"], horizontal=True)
 
-# The Safety Catch Form
 with st.form("search_form"):
     ticker_input = st.text_input("Enter Ticker Symbol:", value="").strip().upper()
     submit_search = st.form_submit_button("Fetch Options Data", type="primary", use_container_width=True)
@@ -189,11 +192,16 @@ if 'active_ticker' in st.session_state:
         m4.metric("Ex-Div Date", ex_div_date)
         m5.metric("Risk-Free", f"{r*100:.1f}%")
 
-        target_date = st.selectbox("Select Expiration Date:", options_dates)
+        # UPDATED DROPDOWN: Uses format_func to display the DTE
+        target_date = st.selectbox(
+            "Select Expiration Date:", 
+            options_dates, 
+            format_func=format_date_dropdown
+        )
         
         dte = (datetime.strptime(target_date, "%Y-%m-%d").date() - datetime.today().date()).days
         if dte <= 0:
-            st.warning("This expiration date is in the past. Select a future date.")
+            st.warning("This expiration date is in the past or expires today. Select a future date.")
         else:
             if earnings_date != "N/A":
                 try:
