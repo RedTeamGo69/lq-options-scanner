@@ -134,9 +134,7 @@ def style_dataframe(df, hv):
                         .format(precision=2)
     return styled_df
 
-# --- NEW HELPER FOR DROPDOWN ---
 def format_date_dropdown(date_str):
-    """Calculates DTE for the dropdown menu display without breaking the underlying string."""
     days_to_exp = (datetime.strptime(date_str, "%Y-%m-%d").date() - datetime.today().date()).days
     return f"{date_str} ({days_to_exp} DTE)"
 
@@ -192,7 +190,6 @@ if 'active_ticker' in st.session_state:
         m4.metric("Ex-Div Date", ex_div_date)
         m5.metric("Risk-Free", f"{r*100:.1f}%")
 
-        # UPDATED DROPDOWN: Uses format_func to display the DTE
         target_date = st.selectbox(
             "Select Expiration Date:", 
             options_dates, 
@@ -290,7 +287,10 @@ if 'active_ticker' in st.session_state:
                             if not df.empty:
                                 best_setups = df.sort_values(by='Edge (%)', ascending=False).head(20)
                                 
-                                st.subheader(f"Top Setups ({dte} DTE)")
+                                # NEW HEADER TEXT: Formats the string dynamically
+                                action_word = "Buying" if action == 'BUY' else "Selling"
+                                type_word = "Puts" if opt_type == 'PUTS' else "Calls"
+                                st.subheader(f"Top Contracts for {action_word} {type_word} | {target_date} ({dte} DTE)")
                                 
                                 styled_df = style_dataframe(best_setups, sigma)
                                 st.dataframe(styled_df, width="stretch", hide_index=True)
