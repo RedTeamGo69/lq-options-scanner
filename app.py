@@ -77,14 +77,22 @@ def get_event_metrics(ticker_symbol):
     except Exception: pass
     return earnings_date, ex_div_date
 
-@st.cache_data(ttl=900) 
+@st.cache_data(ttl=60) # CHANGED: Drops the freeze from 15 minutes to 1 minute
 def get_live_data(ticker_symbol, lookback_days=90):
     try:
         stock = yf.Ticker(ticker_symbol)
         hist = stock.history(period=f"{lookback_days}d")
         if hist.empty: return "EMPTY", None, None
         
-        current_price = hist['Close'].iloc[-1]
+        # --- NEW LIVE PRICE FETCH ---
+        # Bypasses the delayed daily candle to grab the instantaneous quote
+        try:
+            current_price = stock.info.get('currentPrice', stock.fast_info.get('lastPrice'))
+            if current_price is None:
+                current_price = hist['Close'].iloc[-1]
+        except Exception:
+            current_price = hist['Close'].iloc[-1]
+            
         hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
         sigma = hist['Log_Return'].std() * np.sqrt(252)
         
