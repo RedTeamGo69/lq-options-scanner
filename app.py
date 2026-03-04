@@ -205,32 +205,31 @@ if 'active_ticker' in st.session_state:
         today_ny = datetime.now(ny_tz).date()
         dte = (datetime.strptime(target_date, "%Y-%m-%d").date() - today_ny).days
         
-        if dte <= 0:
-            st.warning("This expiration date is in the past or expires today. Select a future date.")
+        # CHANGED: Now only blocks negative numbers (past dates), allowing 0 DTE
+        if dte < 0:
+            st.warning("This expiration date is in the past. Select a valid date.")
         else:
             if earnings_date != "N/A":
-                try:
-                    earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
-                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-                    
-                    if today_ny <= earn_dt <= target_dt:
-                        st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Expect heavy IV Crush.")
-                except Exception: pass
-            
+                # ... (Keep your existing earnings risk code here) ...
+                pass
             if ex_div_date != "N/A":
-                try:
-                    ex_dt = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
-                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-                    
-                    if today_ny <= ex_dt <= target_dt:
-                        st.warning(f"⚠️ **Dividend Risk:** The Ex-Dividend date is {ex_div_date}. The stock price will mechanically drop.")
-                except Exception: pass
+                # ... (Keep your existing dividend risk code here) ...
+                pass
 
             run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
             
             if run_scan:
                 with st.spinner("Crunching Black-Scholes model..."):
-                    T = dte / 365.0 
+                    
+                    # --- NEW 0 DTE INTRADAY MATH ---
+                    if dte == 0:
+                        now_ny = datetime.now(ny_tz)
+                        market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+                        # Calculates exact seconds left, with a 1-hour minimum to prevent math errors near the bell
+                        seconds_left = max((market_close - now_ny).total_seconds(), 3600) 
+                        T = (seconds_left / 86400.0) / 365.0
+                    else:
+                        T = dte / 365.0
                     
                     try:
                         stock_obj = yf.Ticker(ticker)
@@ -284,7 +283,8 @@ if 'active_ticker' in st.session_state:
                                 }
                                 
                                 if action == 'SELL':
-                                    ann_roc = (market_price / strike) * 100 * (365 / dte) if dte > 0 else 0
+                                    effective_dte = max(dte, 1) # Prevents division by zero
+                                    ann_roc = (market_price / strike) * 100 * (365 / effective_dte)
                                     row_data['Ann.ROC (%)'] = round(ann_roc, 1)
                                     
                                 results.append(row_data)
