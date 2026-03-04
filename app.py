@@ -47,8 +47,9 @@ def get_live_data(ticker_symbol, lookback_days=90):
     hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
     sigma = hist['Log_Return'].std() * np.sqrt(252)
     
-    # Safely fetch the official company name
-    company_name = stock.info.get('longName', ticker_symbol)
+    # Removed the stock.info call that causes the cloud crash
+    # Just passing the ticker symbol back to keep the UI from breaking
+    company_name = ticker_symbol 
     
     return current_price, sigma, stock.options, company_name
 
