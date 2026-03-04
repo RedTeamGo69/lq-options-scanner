@@ -28,13 +28,13 @@ class BlackScholesCalculator:
         return d1, d2
 
     def get_call_data(self):
-        if self.T <= 0: return max(0.0, self.S - self.K), 1.0 if self.S > self.K else 0.0
+        if self.T <= 0: return (max(0.0, self.S - self.K), 1.0 if self.S > self.K else 0.0)
         d1, d2 = self._get_d1_d2()
         price = (self.S * norm.cdf(d1)) - (self.K * math.exp(-self.r * self.T) * norm.cdf(d2))
         return round(price, 2), round(norm.cdf(d1), 2)
 
     def get_put_data(self):
-        if self.T <= 0: return max(0.0, self.K - self.S), -1.0 if self.S < self.K else 0.0
+        if self.T <= 0: return (max(0.0, self.K - self.S), -1.0 if self.S < self.K else 0.0)
         d1, d2 = self._get_d1_d2()
         price = (self.K * math.exp(-self.r * self.T) * norm.cdf(-d2)) - (self.S * norm.cdf(-d1))
         return round(price, 2), round(norm.cdf(d1) - 1.0, 2)
@@ -87,7 +87,9 @@ def get_live_data(ticker_symbol, lookback_days=90):
         # --- NEW LIVE PRICE FETCH ---
         # Bypasses the delayed daily candle to grab the instantaneous quote
         try:
-            current_price = stock.info.get('currentPrice', stock.fast_info.get('lastPrice'))
+            current_price = stock.info.get('currentPrice')
+            if current_price is None:
+                current_price = stock.fast_info.last_price
             if current_price is None:
                 current_price = hist['Close'].iloc[-1]
         except Exception:
@@ -218,11 +220,19 @@ if 'active_ticker' in st.session_state:
             st.warning("This expiration date is in the past. Select a valid date.")
         else:
             if earnings_date != "N/A":
-                # ... (Keep your existing earnings risk code here) ...
-                pass
+                try:
+                    earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+                    if today_ny <= earn_dt <= target_dt:
+                        st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Expect heavy IV Crush.")
+                except Exception: pass
             if ex_div_date != "N/A":
-                # ... (Keep your existing dividend risk code here) ...
-                pass
+                try:
+                    ex_dt = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+                    if today_ny <= ex_dt <= target_dt:
+                        st.warning(f"⚠️ **Dividend Risk:** The Ex-Dividend date is {ex_div_date}. The stock price will mechanically drop.")
+                except Exception: pass
 
             run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
             
@@ -233,9 +243,13 @@ if 'active_ticker' in st.session_state:
                     if dte == 0:
                         now_ny = datetime.now(ny_tz)
                         market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
-                        # Calculates exact seconds left, with a 1-hour minimum to prevent math errors near the bell
-                        seconds_left = max((market_close - now_ny).total_seconds(), 3600) 
-                        T = (seconds_left / 86400.0) / 365.0
+                        seconds_left = (market_close - now_ny).total_seconds()
+                        # If market is closed (after 4pm or weekend), use intrinsic value only
+                        if seconds_left <= 0:
+                            T = 0.0
+                        else:
+                            # Floor at 5 minutes to prevent extreme math near the bell
+                            T = (max(seconds_left, 300) / 86400.0) / 365.0
                     else:
                         T = dte / 365.0
                     
@@ -248,23 +262,23 @@ if 'active_ticker' in st.session_state:
                         if not target_chain.empty:
                             target_chain = target_chain.fillna(0)
                             price_col = 'ask' if action == 'BUY' else 'bid'
-                            
+
                             MIN_OPEN_INTEREST = 50
                             MIN_VOLUME = 10
-                            MIN_ABS_DELTA = 0.15 
-                            MAX_ABS_DELTA = 0.80 
-                            
+                            MIN_ABS_DELTA = 0.15
+                            MAX_ABS_DELTA = 0.80
+
                             results = []
                             closest_strike = min(target_chain['strike'].tolist(), key=lambda x: abs(x - S))
-                            
+
                             for _, row in target_chain.iterrows():
                                 strike = row['strike']
                                 market_price = row.get(price_col, 0)
                                 oi = row.get('openInterest', 0)
                                 vol = row.get('volume', 0)
                                 iv = row.get('impliedVolatility', 0)
-                                
-                                if market_price == 0 or oi < MIN_OPEN_INTEREST or vol < MIN_VOLUME: continue 
+
+                                if market_price == 0 or iv == 0 or oi < MIN_OPEN_INTEREST or vol < MIN_VOLUME: continue
                                     
                                 calc = BlackScholesCalculator(S, strike, T, r, sigma)
                                 fair_value, delta = calc.get_put_data() if opt_type == 'PUTS' else calc.get_call_data()
@@ -291,8 +305,10 @@ if 'active_ticker' in st.session_state:
                                 }
                                 
                                 if action == 'SELL':
-                                    effective_dte = max(dte, 1) # Prevents division by zero
-                                    ann_roc = (market_price / strike) * 100 * (365 / effective_dte)
+                                    effective_dte = max(dte, 1)
+                                    # Use strike for puts (cash-secured), stock price for calls (covered)
+                                    capital_at_risk = strike if opt_type == 'PUTS' else S
+                                    ann_roc = (market_price / capital_at_risk) * 100 * (365 / effective_dte)
                                     row_data['Ann.ROC (%)'] = round(ann_roc, 1)
                                     
                                 results.append(row_data)
