@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from scipy.stats import norm
-from datetime import datetime
+from datetime import datetime, timezone
 import streamlit as st
 import urllib.request
 import json
-import requests
 
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(page_title="LQ Quant Options Scanner", page_icon="📈", layout="centered")
@@ -39,7 +38,7 @@ class BlackScholesCalculator:
         price = (self.K * math.exp(-self.r * self.T) * norm.cdf(-d2)) - (self.S * norm.cdf(-d1))
         return round(price, 2), round(norm.cdf(d1) - 1.0, 2)
 
-# --- DATA FUNCTIONS ---
+# --- DIRECT YAHOO API FUNCTIONS ---
 @st.cache_data(ttl=86400) 
 def get_company_name(ticker_symbol):
     try:
@@ -78,37 +77,48 @@ def get_event_metrics(ticker_symbol):
     return earnings_date, ex_div_date
 
 @st.cache_data(ttl=900) 
-def get_live_data(ticker_symbol, api_key, lookback_days=90):
+def get_live_data_direct(ticker_symbol, lookback_days=90):
+    """Bypasses yfinance and hits the raw Yahoo backend to prevent cloud IP bans."""
     try:
-        stock = yf.Ticker(ticker_symbol)
-        hist = stock.history(period=f"{lookback_days}d")
-        if hist.empty: return "EMPTY", None, None, None
+        # 1. Direct API call for Spot Price and Expiration Dates
+        url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker_symbol}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
         
-        hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
-        sigma = hist['Log_Return'].std() * np.sqrt(252)
-        
-        url = f"https://api.polygon.io/v3/snapshot/options/{ticker_symbol}?apiKey={api_key}"
-        response = requests.get(url).json()
-        
-        if response.get("status") != "OK":
-            # Raising an error ensures Streamlit DOES NOT cache this failure
-            raise ValueError("RATE_LIMIT")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            result = data['optionChain']['result'][0]
             
-        contracts = response.get("results", [])
-        if not contracts:
-            return "EMPTY", None, None, None
+            current_price = result['quote']['regularMarketPrice']
+            exp_timestamps = result.get('expirationDates', [])
             
-        poly_price = contracts[0].get("underlying_asset", {}).get("price")
-        current_price = poly_price if poly_price else hist['Close'].iloc[-1]
+            # Convert Unix timestamps to YYYY-MM-DD
+            options_dates = [datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d') for ts in exp_timestamps]
             
-        options_dates = sorted(list(set([c["details"]["expiration_date"] for c in contracts])))
-        
-        return current_price, sigma, options_dates, contracts
-        
-    except ValueError as ve:
-        raise ve
+            # 2. Grab Historical Volatility 
+            stock = yf.Ticker(ticker_symbol)
+            hist = stock.history(period=f"{lookback_days}d")
+            sigma = 0.30 # Default fallback
+            if not hist.empty:
+                hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
+                sigma = hist['Log_Return'].std() * np.sqrt(252)
+
+            return current_price, sigma, options_dates, exp_timestamps
+            
     except Exception:
         return "ERROR", None, None, None
+
+def fetch_direct_options_chain(ticker, unix_timestamp):
+    """Pulls the specific options chain directly from Yahoo's backend."""
+    url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={unix_timestamp}"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    
+    with urllib.request.urlopen(req, timeout=5) as response:
+        data = json.loads(response.read().decode())
+        options = data['optionChain']['result'][0]['options'][0]
+        
+        calls = pd.DataFrame(options.get('calls', []))
+        puts = pd.DataFrame(options.get('puts', []))
+        return calls, puts
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
@@ -152,148 +162,142 @@ def style_dataframe(df, hv):
 st.title("📈 LQ Quant Options Scanner")
 st.markdown("Identify mathematical edge via Black-Scholes pricing.")
 
-# 1. Trading controls sit outside the form so they don't trigger API calls
 col1, col2 = st.columns(2)
 with col1:
     action = st.radio("Action:", ["SELL", "BUY"], horizontal=True)
 with col2:
     opt_type = st.radio("Type:", ["PUTS", "CALLS"], horizontal=True)
 
-api_key = st.secrets.get("POLYGON_TOKEN", "")
+with st.form("search_form"):
+    ticker_input = st.text_input("Enter Ticker Symbol:", value="").strip().upper()
+    submit_search = st.form_submit_button("Fetch Options Data", type="primary", use_container_width=True)
 
-if not api_key:
-    st.error("🔒 Please add your POLYGON_TOKEN to the Streamlit Secrets vault to pull data.")
-else:
-    # 2. The Safety Catch Form
-    with st.form("search_form"):
-        ticker_input = st.text_input("Enter Ticker Symbol:", value="").strip().upper()
-        submit_search = st.form_submit_button("Fetch Options Data", type="primary", use_container_width=True)
+if submit_search and ticker_input:
+    st.session_state['active_ticker'] = ticker_input
+elif submit_search and not ticker_input:
+    st.warning("Please enter a ticker symbol.")
 
-    if submit_search and ticker_input:
-        st.session_state['active_ticker'] = ticker_input
-    elif submit_search and not ticker_input:
-        st.warning("Please enter a ticker symbol.")
-
-    # 3. Process the Data
-    if 'active_ticker' in st.session_state:
-        ticker = st.session_state['active_ticker']
+if 'active_ticker' in st.session_state:
+    ticker = st.session_state['active_ticker']
+    
+    with st.spinner(f"Pulling raw data for {ticker}..."):
+        S, sigma, options_dates, exp_timestamps = get_live_data_direct(ticker)
         
-        try:
-            with st.spinner(f"Pulling institutional data for {ticker}..."):
-                S, sigma, options_dates, contracts = get_live_data(ticker, api_key)
-                
-            if S == "EMPTY" or S == "ERROR":
-                st.error(f"Could not find valid data for {ticker}. Please check the symbol.")
-            elif not options_dates:
-                st.error(f"No options available for {ticker}.")
-            else:
-                r = get_risk_free_rate()
-                earnings_date, ex_div_date = get_event_metrics(ticker)
-                
-                company_name = get_company_name(ticker)
-                if company_name.upper() == ticker.upper():
-                    st.subheader(f"{ticker}")
-                else:
-                    st.subheader(f"{company_name} ({ticker})")
-                
-                st.divider()
-                
-                m1, m2 = st.columns(2)
-                m1.metric("Live Price", f"${S:.2f}")
-                m2.metric("Hist. Volatility", f"{sigma*100:.1f}%")
-                
-                m3, m4, m5 = st.columns(3)
-                m3.metric("Next Earnings", earnings_date)
-                m4.metric("Ex-Div Date", ex_div_date)
-                m5.metric("Risk-Free", f"{r*100:.1f}%")
+    if S == "ERROR":
+        st.error(f"Could not find valid data for {ticker}. Please check the symbol.")
+    elif not options_dates:
+        st.error(f"No options available for {ticker}.")
+    else:
+        r = get_risk_free_rate()
+        earnings_date, ex_div_date = get_event_metrics(ticker)
+        
+        company_name = get_company_name(ticker)
+        if company_name.upper() == ticker.upper():
+            st.subheader(f"{ticker}")
+        else:
+            st.subheader(f"{company_name} ({ticker})")
+        
+        st.divider()
+        
+        m1, m2 = st.columns(2)
+        m1.metric("Live Price", f"${S:.2f}")
+        m2.metric("Hist. Volatility", f"{sigma*100:.1f}%")
+        
+        m3, m4, m5 = st.columns(3)
+        m3.metric("Next Earnings", earnings_date)
+        m4.metric("Ex-Div Date", ex_div_date)
+        m5.metric("Risk-Free", f"{r*100:.1f}%")
 
-                target_date = st.selectbox("Select Expiration Date:", options_dates)
-                
-                dte = (datetime.strptime(target_date, "%Y-%m-%d") - datetime.today()).days
-                if dte <= 0:
-                    st.warning("This expiration date is in the past. Select another date.")
-                else:
-                    if earnings_date != "N/A":
-                        try:
-                            earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
-                            target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-                            today_dt = datetime.today().date()
-                            
-                            if today_dt <= earn_dt <= target_dt:
-                                st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Expect heavy IV Crush.")
-                        except Exception: pass
+        target_date = st.selectbox("Select Expiration Date:", options_dates)
+        
+        dte = (datetime.strptime(target_date, "%Y-%m-%d").date() - datetime.today().date()).days
+        if dte <= 0:
+            st.warning("This expiration date is in the past or expires today. Select a future date.")
+        else:
+            if earnings_date != "N/A":
+                try:
+                    earn_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+                    today_dt = datetime.today().date()
                     
-                    if ex_div_date != "N/A":
-                        try:
-                            ex_dt = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
-                            target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-                            today_dt = datetime.today().date()
-                            
-                            if today_dt <= ex_dt <= target_dt:
-                                st.warning(f"⚠️ **Dividend Risk:** The Ex-Dividend date is {ex_div_date}. The stock price will mechanically drop.")
-                        except Exception: pass
+                    if today_dt <= earn_dt <= target_dt:
+                        st.warning(f"⚠️ **Earnings Risk:** An earnings report is scheduled for {earnings_date}. Expect heavy IV Crush.")
+                except Exception: pass
+            
+            if ex_div_date != "N/A":
+                try:
+                    ex_dt = datetime.strptime(ex_div_date, "%Y-%m-%d").date()
+                    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+                    today_dt = datetime.today().date()
+                    
+                    if today_dt <= ex_dt <= target_dt:
+                        st.warning(f"⚠️ **Dividend Risk:** The Ex-Dividend date is {ex_div_date}. The stock price will mechanically drop.")
+                except Exception: pass
 
-                    run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
+            run_scan = st.button("🚀 Scan Options Chain", width="stretch", type="primary")
+            
+            if run_scan:
+                with st.spinner("Crunching Black-Scholes model..."):
+                    T = dte / 365.0 
                     
-                    if run_scan:
-                        with st.spinner("Crunching Black-Scholes model..."):
-                            T = dte / 365.0 
-                            
-                            poly_type = "put" if opt_type == 'PUTS' else "call"
-                            target_contracts = [c for c in contracts if c["details"]["expiration_date"] == target_date and c["details"]["contract_type"] == poly_type]
+                    try:
+                        # Match the selected date to the exact Unix timestamp Yahoo expects
+                        date_index = options_dates.index(target_date)
+                        target_unix = exp_timestamps[date_index]
+                        
+                        # Fetch the direct chain!
+                        calls_df, puts_df = fetch_direct_options_chain(ticker, target_unix)
+                        target_chain = puts_df if opt_type == 'PUTS' else calls_df
+                        
+                        if not target_chain.empty:
+                            target_chain = target_chain.fillna(0)
+                            price_col = 'ask' if action == 'BUY' else 'bid'
                             
                             MIN_OPEN_INTEREST = 50
                             MIN_VOLUME = 10
                             MIN_ABS_DELTA = 0.15 
                             
                             results = []
+                            closest_strike = min(target_chain['strike'].tolist(), key=lambda x: abs(x - S))
                             
-                            if target_contracts:
-                                closest_strike = min([c["details"]["strike_price"] for c in target_contracts], key=lambda x: abs(x - S))
+                            for _, row in target_chain.iterrows():
+                                strike = row['strike']
+                                market_price = row.get(price_col, 0)
+                                oi = row.get('openInterest', 0)
+                                vol = row.get('volume', 0)
+                                iv = row.get('impliedVolatility', 0)
                                 
-                                for c in target_contracts:
-                                    strike = c["details"]["strike_price"]
+                                if market_price == 0 or oi < MIN_OPEN_INTEREST or vol < MIN_VOLUME: continue 
                                     
-                                    market_price = c.get("day", {}).get("close", 0)
-                                    if market_price == 0:
-                                        market_price = c.get("last_quote", {}).get("ask", 0)
-                                        
-                                    oi = c.get("open_interest", 0)
-                                    vol = c.get("day", {}).get("volume", 0)
-                                    iv = c.get("implied_volatility", 0)
-                                    if iv is None: iv = 0
+                                calc = BlackScholesCalculator(S, strike, T, r, sigma)
+                                fair_value, delta = calc.get_put_data() if opt_type == 'PUTS' else calc.get_call_data()
                                     
-                                    if market_price == 0 or oi < MIN_OPEN_INTEREST or vol < MIN_VOLUME: continue 
-                                        
-                                    calc = BlackScholesCalculator(S, strike, T, r, sigma)
-                                    fair_value, delta = calc.get_put_data() if opt_type == 'PUTS' else calc.get_call_data()
-                                        
-                                    if abs(delta) < MIN_ABS_DELTA: continue
-                                        
-                                    if action == 'BUY':
-                                        edge = fair_value - market_price
-                                    else:
-                                        edge = market_price - fair_value
-                                        
-                                    edge_pct = (edge / market_price * 100) if market_price > 0 else 0
+                                if abs(delta) < MIN_ABS_DELTA: continue
                                     
-                                    row_data = {
-                                        'Moneyness': get_raw_moneyness(S, strike, opt_type[0], closest_strike),
-                                        'Strike': strike,
-                                        'Delta': delta,
-                                        'Price': market_price,
-                                        'Fair Val': round(fair_value, 2),
-                                        'Edge (%)': round(edge_pct, 1),
-                                        'IV (%)': round(iv * 100, 1),
-                                        'Vol': int(vol),
-                                        'OI': int(oi)
-                                    }
+                                if action == 'BUY':
+                                    edge = fair_value - market_price
+                                else:
+                                    edge = market_price - fair_value
                                     
-                                    if action == 'SELL':
-                                        ann_roc = (market_price / strike) * 100 * (365 / dte) if dte > 0 else 0
-                                        row_data['Ann.ROC (%)'] = round(ann_roc, 1)
-                                        
-                                    results.append(row_data)
+                                edge_pct = (edge / market_price * 100) if market_price > 0 else 0
+                                
+                                row_data = {
+                                    'Moneyness': get_raw_moneyness(S, strike, opt_type[0], closest_strike),
+                                    'Strike': strike,
+                                    'Delta': delta,
+                                    'Price': market_price,
+                                    'Fair Val': round(fair_value, 2),
+                                    'Edge (%)': round(edge_pct, 1),
+                                    'IV (%)': round(iv * 100, 1),
+                                    'Vol': int(vol),
+                                    'OI': int(oi)
+                                }
+                                
+                                if action == 'SELL':
+                                    ann_roc = (market_price / strike) * 100 * (365 / dte) if dte > 0 else 0
+                                    row_data['Ann.ROC (%)'] = round(ann_roc, 1)
+                                    
+                                results.append(row_data)
 
                             df = pd.DataFrame(results)
                             
@@ -315,9 +319,8 @@ else:
                                 )
                             else:
                                 st.warning("No liquid, viable contracts found for that date.")
-                                
-        except ValueError as e:
-            if str(e) == "RATE_LIMIT":
-                st.warning("⚠️ **Polygon Rate Limit Hit:** You have hit the 5 requests per minute limit. Please wait 60 seconds before clicking Fetch Options Data again.")
-            else:
-                st.error("An unexpected error occurred.")
+                        else:
+                            st.warning("No options chain returned for this date.")
+                            
+                    except Exception as e:
+                        st.error(f"Error crunching data: {e}")
