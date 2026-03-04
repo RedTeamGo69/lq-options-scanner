@@ -239,6 +239,7 @@ if 'active_ticker' in st.session_state:
                             MIN_OPEN_INTEREST = 50
                             MIN_VOLUME = 10
                             MIN_ABS_DELTA = 0.15 
+                            MAX_ABS_DELTA = 0.80  # <-- NEW: Blocks Deep ITM mirages 
                             
                             results = []
                             closest_strike = min(target_chain['strike'].tolist(), key=lambda x: abs(x - S))
@@ -255,7 +256,7 @@ if 'active_ticker' in st.session_state:
                                 calc = BlackScholesCalculator(S, strike, T, r, sigma)
                                 fair_value, delta = calc.get_put_data() if opt_type == 'PUTS' else calc.get_call_data()
                                     
-                                if abs(delta) < MIN_ABS_DELTA: continue
+                                if abs(delta) < MIN_ABS_DELTA or abs(delta) > MAX_ABS_DELTA: continue
                                     
                                 if action == 'BUY':
                                     edge = fair_value - market_price
