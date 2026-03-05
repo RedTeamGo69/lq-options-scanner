@@ -408,13 +408,13 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
                             iv_rank = max(0, min(iv_rank, 100))
 
                             if iv_rank >= 70:
-                                rank_label = "HIGH — Premium is rich. Favor selling."
+                                rank_label = "HIGH — Favor selling"
                             elif iv_rank <= 30:
-                                rank_label = "LOW — Premium is cheap. Favor buying."
+                                rank_label = "LOW — Favor buying"
                             else:
                                 rank_label = "NEUTRAL"
 
-                            st.metric("IV Rank (52-wk)", f"{iv_rank:.0f}%  —  {rank_label}")
+                            st.metric("IV Rank (52-wk)", f"{iv_rank:.0f}%", delta=rank_label, delta_color="off")
 
                         styled_df = style_dataframe(best_setups, sigma)
                         st.dataframe(styled_df, width="stretch", hide_index=True)
