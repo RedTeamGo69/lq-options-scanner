@@ -312,6 +312,9 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
 
     run_scan = st.button("Scan Options Chain", width="stretch", type="primary", key=f"scan_{key_suffix}")
 
+    # Session state key for persisting results across tab switches
+    results_key = f"results_{ticker}_{action}_{opt_type}"
+
     if run_scan:
         with st.spinner("Crunching Black-Scholes model..."):
             try:
@@ -391,46 +394,22 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
 
                     if not df.empty:
                         best_setups = df.sort_values(by='Edge (%)', ascending=False).head(20)
-
-                        action_word = "Buying" if action == 'BUY' else "Selling"
-                        type_word = "Puts" if opt_type == 'PUTS' else "Calls"
-                        st.subheader(f"Top Contracts for {action_word} {type_word} | {target_date} ({dte} DTE)")
-
-                        # --- IV Rank display ---
-                        if hv_low is not None and hv_high is not None and (hv_high - hv_low) > 0:
-                            # Use ATM IV from the chain as current IV proxy
-                            atm_rows = best_setups[best_setups['Moneyness'] == 'ATM']
-                            if not atm_rows.empty:
-                                atm_iv = atm_rows.iloc[0]['IV (%)'] / 100.0
-                            else:
-                                atm_iv = best_setups.iloc[0]['IV (%)'] / 100.0
-                            iv_rank = (atm_iv - hv_low) / (hv_high - hv_low) * 100
-                            iv_rank = max(0, min(iv_rank, 100))
-
-                            if iv_rank >= 70:
-                                rank_label = "HIGH — Favor selling"
-                            elif iv_rank <= 30:
-                                rank_label = "LOW — Favor buying"
-                            else:
-                                rank_label = "NEUTRAL"
-
-                            st.metric("IV Rank (52-wk)", f"{iv_rank:.0f}%", delta=rank_label, delta_color="off")
-
-                        styled_df = style_dataframe(best_setups, sigma)
-                        st.dataframe(styled_df, width="stretch", hide_index=True)
-
-                        csv = best_setups.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="Download Clean CSV",
-                            data=csv,
-                            file_name=f"{ticker}_{action}_{opt_type}_{target_date}.csv",
-                            mime="text/csv",
-                            width="stretch",
-                            key=f"dl_{key_suffix}"
-                        )
+                        # Persist to session state
+                        st.session_state[results_key] = {
+                            'df': best_setups,
+                            'sigma': sigma,
+                            'hv_low': hv_low,
+                            'hv_high': hv_high,
+                            'target_date': target_date,
+                            'dte': dte,
+                            'action': action,
+                            'opt_type': opt_type,
+                        }
                     else:
+                        st.session_state.pop(results_key, None)
                         st.warning("No liquid, viable contracts found for that date.")
                 else:
+                    st.session_state.pop(results_key, None)
                     st.warning("No options chain returned for this date.")
 
             except Exception as e:
@@ -438,6 +417,53 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
                     st.warning("Yahoo Rate Limit Hit: Please wait 60 seconds before scanning the chain.")
                 else:
                     st.error(f"Error crunching data: {e}")
+
+    # --- Display persisted results ---
+    if results_key in st.session_state:
+        cached = st.session_state[results_key]
+        best_setups = cached['df']
+        cached_sigma = cached['sigma']
+        cached_hv_low = cached['hv_low']
+        cached_hv_high = cached['hv_high']
+        cached_date = cached['target_date']
+        cached_dte = cached['dte']
+        cached_action = cached['action']
+        cached_opt_type = cached['opt_type']
+
+        action_word = "Buying" if cached_action == 'BUY' else "Selling"
+        type_word = "Puts" if cached_opt_type == 'PUTS' else "Calls"
+        st.subheader(f"Top Contracts for {action_word} {type_word} | {cached_date} ({cached_dte} DTE)")
+
+        # --- IV Rank display ---
+        if cached_hv_low is not None and cached_hv_high is not None and (cached_hv_high - cached_hv_low) > 0:
+            atm_rows = best_setups[best_setups['Moneyness'] == 'ATM']
+            if not atm_rows.empty:
+                atm_iv = atm_rows.iloc[0]['IV (%)'] / 100.0
+            else:
+                atm_iv = best_setups.iloc[0]['IV (%)'] / 100.0
+            iv_rank = (atm_iv - cached_hv_low) / (cached_hv_high - cached_hv_low) * 100
+            iv_rank = max(0, min(iv_rank, 100))
+
+            st.metric("IV Rank (52-wk)", f"{iv_rank:.0f}%")
+            if iv_rank >= 70:
+                st.caption(":red[HIGH — Favor selling]")
+            elif iv_rank <= 30:
+                st.caption(":green[LOW — Favor buying]")
+            else:
+                st.caption(":gray[NEUTRAL]")
+
+        styled_df = style_dataframe(best_setups, cached_sigma)
+        st.dataframe(styled_df, width="stretch", hide_index=True)
+
+        csv = best_setups.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Clean CSV",
+            data=csv,
+            file_name=f"{ticker}_{cached_action}_{cached_opt_type}_{cached_date}.csv",
+            mime="text/csv",
+            width="stretch",
+            key=f"dl_{key_suffix}_{cached_date}"
+        )
 
 # --- MAIN APP UI ---
 st.title("📈 LQ Quant Options Scanner")
