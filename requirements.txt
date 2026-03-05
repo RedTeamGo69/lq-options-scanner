@@ -1,4 +1,6 @@
 streamlit
 yfinance
 pandas
+numpy
 scipy
+pytz
