@@ -1,3 +1,4 @@
+from pandas.io.formats.style import Styler
 import math
 import os
 import sqlite3
@@ -595,10 +596,6 @@ def get_option_chain(ticker_symbol: str, expiration: str) -> pd.DataFrame:
 # ============================================================
 @st.cache_data(ttl=3600)
 def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
-    """
-    Best-effort Yahoo enrichment.
-    Returns ISO date strings when available.
-    """
     result = {
         "next_earnings_date": None,
         "ex_dividend_date": None,
@@ -607,7 +604,6 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
     try:
         tkr = yf.Ticker(ticker_symbol)
 
-        # Earnings dates
         earnings_dt = None
         try:
             edf = tkr.get_earnings_dates(limit=8)
@@ -643,7 +639,6 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
         if earnings_dt is not None and pd.notna(earnings_dt):
             result["next_earnings_date"] = pd.Timestamp(earnings_dt).date().isoformat()
 
-        # Ex-dividend date
         try:
             fast_info = getattr(tkr, "fast_info", None)
             if fast_info:
@@ -831,9 +826,9 @@ def short_option_yield_metrics(action: str, option_type: str, S: float, K: float
     effective_dte = max(dte, 1)
 
     if option_type == "PUT":
-        capital_base = K  # cash-secured put approximation
+        capital_base = K
     else:
-        capital_base = S  # covered call approximation
+        capital_base = S
 
     if capital_base <= 0:
         return {"Simple Yield (%)": np.nan, "Ann Yield (%)": np.nan}
@@ -864,6 +859,8 @@ def build_term_structure_snapshot(
             dte, _ = compute_time_to_expiry_years(exp)
             if dte < 0:
                 continue
+
+                # no-op
 
             chain = get_option_chain(ticker, exp)
             if chain.empty:
@@ -1110,7 +1107,7 @@ def screen_chain(
 # ============================================================
 # DISPLAY HELPERS
 # ============================================================
-def style_results(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def style_results(df: pd.DataFrame) -> Styler:
     def color_edge(val):
         if pd.isna(val):
             return ""
@@ -1155,7 +1152,7 @@ def style_results(df: pd.DataFrame) -> pd.io.formats.style.Styler:
         "Moneyness": color_moneyness,
     }.items():
         if col in df.columns:
-            styler = styler.map(func, subset=[col])
+            styler = styler.applymap(func, subset=[col])
 
     return styler.format(
         {
@@ -1351,7 +1348,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
     with ctrl_col:
         run_scan = st.button(
             "Scan Chain",
-            width="stretch",
+            use_container_width=True,
             type="primary",
             key=f"scan_{ticker}_{key_suffix}",
         )
@@ -1496,7 +1493,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
 
         st.dataframe(
             styled,
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
             column_config={
                 "Strike": st.column_config.NumberColumn("Strike", format="$ %.2f"),
@@ -1521,7 +1518,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             data=csv,
             file_name=f"{ticker}_{action}_{option_family}_{cached['expiration']}.csv",
             mime="text/csv",
-            width="stretch",
+            use_container_width=True,
             key=f"dl_{ticker}_{action}_{option_family}_{cached['expiration']}",
         )
 
@@ -1530,7 +1527,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         if term_df.empty:
             st.warning("No term-structure data available.")
         else:
-            st.dataframe(term_df, width="stretch", hide_index=True)
+            st.dataframe(term_df, use_container_width=True, hide_index=True)
             chart_df = term_df.set_index("DTE")[["ATM Avg IV (%)"]]
             st.line_chart(chart_df)
 
@@ -1539,7 +1536,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         if put_skew_df.empty:
             st.warning("No put skew data available.")
         else:
-            st.dataframe(put_skew_df, width="stretch", hide_index=True)
+            st.dataframe(put_skew_df, use_container_width=True, hide_index=True)
             st.line_chart(put_skew_df.set_index("Pct From Spot")[["IV (%)"]])
 
     with tabs[3]:
@@ -1547,7 +1544,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         if call_skew_df.empty:
             st.warning("No call skew data available.")
         else:
-            st.dataframe(call_skew_df, width="stretch", hide_index=True)
+            st.dataframe(call_skew_df, use_container_width=True, hide_index=True)
             st.line_chart(call_skew_df.set_index("Pct From Spot")[["IV (%)"]])
 
     with tabs[4]:
@@ -1559,7 +1556,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             iv_hist_df["snapshot_date"] = pd.to_datetime(iv_hist_df["snapshot_date"], errors="coerce")
             iv_hist_df["atm_avg_iv_pct"] = pd.to_numeric(iv_hist_df["atm_avg_iv"], errors="coerce") * 100.0
 
-            st.dataframe(iv_hist_df, width="stretch", hide_index=True)
+            st.dataframe(iv_hist_df, use_container_width=True, hide_index=True)
 
             daily = (
                 iv_hist_df.groupby("snapshot_date", as_index=False)["atm_avg_iv_pct"]
