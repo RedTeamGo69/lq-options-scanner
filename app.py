@@ -14,6 +14,8 @@ st.set_page_config(page_title="LQ Quant Options Scanner", page_icon="📈", layo
 
 TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
 TRADIER_API_KEY = os.getenv("TRADIER_API_KEY", "")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred")
 
 
 def tradier_get(path, params=None):
@@ -25,6 +27,22 @@ def tradier_get(path, params=None):
         "Accept": "application/json",
     }
     response = requests.get(f"{TRADIER_BASE_URL}{path}", headers=headers, params=params, timeout=8)
+    response.raise_for_status()
+    return response.json()
+
+
+def fred_get(path, params=None):
+    if not FRED_API_KEY:
+        raise ValueError("Missing FRED API key. Set FRED_API_KEY environment variable.")
+
+    query = {
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+    }
+    if params:
+        query.update(params)
+
+    response = requests.get(f"{FRED_BASE_URL}{path}", params=query, timeout=8)
     response.raise_for_status()
     return response.json()
 
@@ -208,8 +226,30 @@ def get_iv_rank_data(ticker_symbol):
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
-    # Static fallback. Replace with a treasury source if you have one available.
-    return 0.045
+    fallback_rate = 0.045
+
+    if not FRED_API_KEY:
+        return fallback_rate
+
+    try:
+        # 3-Month Treasury Bill Secondary Market Rate, Discount Basis (Percent, Daily)
+        payload = fred_get(
+            "/series/observations",
+            params={
+                "series_id": "DTB3",
+                "sort_order": "desc",
+                "limit": 30,
+            },
+        )
+        observations = payload.get("observations", [])
+        for obs in observations:
+            value = obs.get("value")
+            if value and value != ".":
+                return float(value) / 100.0
+    except Exception:
+        pass
+
+    return fallback_rate
 
 def get_raw_moneyness(S, K, opt_type, closest_strike):
     if K == closest_strike: return "ATM"
