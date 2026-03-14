@@ -1,16 +1,50 @@
 import math
+import os
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from scipy.stats import norm
 from datetime import datetime
+from datetime import timedelta
 import pytz
 import streamlit as st
-import urllib.request
-import json
+import requests
 
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(page_title="LQ Quant Options Scanner", page_icon="📈", layout="centered")
+
+TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+TRADIER_API_KEY = os.getenv("TRADIER_API_KEY", "")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred")
+
+
+def tradier_get(path, params=None):
+    if not TRADIER_API_KEY:
+        raise ValueError("Missing Tradier API key. Set TRADIER_API_KEY environment variable.")
+
+    headers = {
+        "Authorization": f"Bearer {TRADIER_API_KEY}",
+        "Accept": "application/json",
+    }
+    response = requests.get(f"{TRADIER_BASE_URL}{path}", headers=headers, params=params, timeout=8)
+    response.raise_for_status()
+    return response.json()
+
+
+def fred_get(path, params=None):
+    if not FRED_API_KEY:
+        raise ValueError("Missing FRED API key. Set FRED_API_KEY environment variable.")
+
+    query = {
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+    }
+    if params:
+        query.update(params)
+
+    response = requests.get(f"{FRED_BASE_URL}{path}", params=query, timeout=8)
+    response.raise_for_status()
+    return response.json()
 
 # --- CORE MATH CLASS (Merton Dividend-Adjusted Black-Scholes) ---
 class BlackScholesCalculator:
@@ -75,74 +109,90 @@ class BlackScholesCalculator:
 @st.cache_data(ttl=86400)
 def get_company_name(ticker_symbol):
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker_symbol}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            data = json.loads(response.read().decode())
-            quotes = data.get('quotes', [])
-            if quotes:
-                name = quotes[0].get('longname') or quotes[0].get('shortname')
-                if name:
-                    return name
-    except Exception: pass
+        data = tradier_get('/markets/quotes', params={'symbols': ticker_symbol})
+        quote = data.get('quotes', {}).get('quote')
+        if isinstance(quote, list):
+            quote = quote[0] if quote else {}
+        description = quote.get('description') if isinstance(quote, dict) else None
+        if description:
+            return description
+    except Exception:
+        pass
     return ticker_symbol
 
 @st.cache_data(ttl=86400)
 def get_event_metrics(ticker_symbol):
-    earnings_date = "N/A"
-    ex_div_date = "N/A"
-    try:
-        stock = yf.Ticker(ticker_symbol)
-        try:
-            cal = stock.calendar
-            if isinstance(cal, dict):
-                if 'Earnings Date' in cal and cal['Earnings Date']:
-                    earnings_date = cal['Earnings Date'][0].strftime('%Y-%m-%d')
-                if 'Ex-Dividend Date' in cal and cal['Ex-Dividend Date']:
-                    ex_div_date = cal['Ex-Dividend Date'].strftime('%Y-%m-%d')
-            elif isinstance(cal, pd.DataFrame):
-                if 'Earnings Date' in cal.index:
-                    earnings_date = cal.loc['Earnings Date'].iloc[0].strftime('%Y-%m-%d')
-                if 'Ex-Dividend Date' in cal.index:
-                    ex_div_date = cal.loc['Ex-Dividend Date'].iloc[0].strftime('%Y-%m-%d')
-        except Exception: pass
-    except Exception: pass
-    return earnings_date, ex_div_date
+    # Tradier's core market API does not provide earnings calendar or ex-dividend dates.
+    return "N/A", "N/A"
+
+
+def parse_history_rows(history_payload):
+    history_obj = history_payload.get('history') if isinstance(history_payload, dict) else None
+    day_rows = history_obj.get('day') if isinstance(history_obj, dict) else None
+    if day_rows is None:
+        return []
+    if isinstance(day_rows, dict):
+        return [day_rows]
+    if isinstance(day_rows, list):
+        return day_rows
+    return []
 
 @st.cache_data(ttl=60)
 def get_live_data(ticker_symbol, lookback_days=90):
     try:
-        stock = yf.Ticker(ticker_symbol)
-        hist = stock.history(period=f"{lookback_days}d")
-        if hist.empty: return "EMPTY", None, None, None
+        end_date = datetime.utcnow().date()
+        start_date = end_date - timedelta(days=lookback_days * 2)
 
-        # Fast path first for price, slow path fallback
-        try:
-            current_price = stock.fast_info.last_price
-            if current_price is None:
-                current_price = hist['Close'].iloc[-1]
-        except Exception:
-            current_price = hist['Close'].iloc[-1]
+        quote_payload = tradier_get('/markets/quotes', params={'symbols': ticker_symbol})
+        quote = quote_payload.get('quotes', {}).get('quote')
+        if isinstance(quote, list):
+            quote = quote[0] if quote else None
+        if not isinstance(quote, dict):
+            return "EMPTY", None, None, None
 
-        # Dividend yield for Merton model (requires full info call)
-        # Yahoo sometimes returns yield as a whole number (e.g. 4.01 meaning 4.01%)
-        # instead of decimal form (0.0401). Detect and convert.
-        try:
-            div_yield = stock.info.get('dividendYield', 0.0) or 0.0
-            if div_yield > 1.0:
-                div_yield = div_yield / 100.0
-        except Exception:
-            div_yield = 0.0
+        current_price = quote.get('last') or quote.get('close')
+        if current_price is None:
+            return "EMPTY", None, None, None
 
-        hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
+        div_yield = quote.get('div_yield', 0.0) or 0.0
+        if div_yield > 1.0:
+            div_yield = div_yield / 100.0
+
+        history_payload = tradier_get(
+            '/markets/history',
+            params={
+                'symbol': ticker_symbol,
+                'interval': 'daily',
+                'start': start_date.strftime('%Y-%m-%d'),
+                'end': end_date.strftime('%Y-%m-%d'),
+            },
+        )
+        rows = parse_history_rows(history_payload)
+        if not rows:
+            return "EMPTY", None, None, None
+
+        hist = pd.DataFrame(rows)
+        hist['close'] = pd.to_numeric(hist['close'], errors='coerce')
+        hist = hist.dropna(subset=['close'])
+        if len(hist) < 20:
+            return "EMPTY", None, None, None
+
+        hist['Log_Return'] = np.log(hist['close'] / hist['close'].shift(1))
         sigma = hist['Log_Return'].std() * np.sqrt(252)
 
-        options_dates = stock.options
+        exp_payload = tradier_get('/markets/options/expirations', params={'symbol': ticker_symbol, 'includeAllRoots': 'true', 'strikes': 'false'})
+        expiration = exp_payload.get('expirations', {}).get('date')
+        if isinstance(expiration, str):
+            options_dates = [expiration]
+        elif isinstance(expiration, list):
+            options_dates = expiration
+        else:
+            options_dates = []
 
         return current_price, sigma, options_dates, div_yield
 
     except Exception as e:
-        if "RateLimit" in str(type(e).__name__) or "429" in str(e):
+        if '429' in str(e):
             return "RATE_LIMIT", None, None, None
         return "ERROR", None, None, None
 
@@ -150,10 +200,23 @@ def get_live_data(ticker_symbol, lookback_days=90):
 def get_iv_rank_data(ticker_symbol):
     """Get 1-year rolling HV range for IV rank calculation."""
     try:
-        stock = yf.Ticker(ticker_symbol)
-        hist = stock.history(period="1y")
+        end_date = datetime.utcnow().date()
+        start_date = end_date - timedelta(days=400)
+        history_payload = tradier_get(
+            '/markets/history',
+            params={
+                'symbol': ticker_symbol,
+                'interval': 'daily',
+                'start': start_date.strftime('%Y-%m-%d'),
+                'end': end_date.strftime('%Y-%m-%d'),
+            },
+        )
+        rows = parse_history_rows(history_payload)
+        hist = pd.DataFrame(rows)
+        hist['close'] = pd.to_numeric(hist['close'], errors='coerce')
+        hist = hist.dropna(subset=['close'])
         if len(hist) < 60: return None, None
-        hist['Log_Return'] = np.log(hist['Close'] / hist['Close'].shift(1))
+        hist['Log_Return'] = np.log(hist['close'] / hist['close'].shift(1))
         hist['Rolling_HV'] = hist['Log_Return'].rolling(window=30).std() * np.sqrt(252)
         hv_series = hist['Rolling_HV'].dropna()
         if hv_series.empty: return None, None
@@ -163,12 +226,30 @@ def get_iv_rank_data(ticker_symbol):
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
+    fallback_rate = 0.045
+
+    if not FRED_API_KEY:
+        return fallback_rate
+
     try:
-        irx = yf.Ticker("^IRX")
-        hist = irx.history(period="5d")
-        if not hist.empty: return hist['Close'].iloc[-1] / 100.0
-    except Exception: pass
-    return 0.045
+        # 3-Month Treasury Bill Secondary Market Rate, Discount Basis (Percent, Daily)
+        payload = fred_get(
+            "/series/observations",
+            params={
+                "series_id": "DTB3",
+                "sort_order": "desc",
+                "limit": 30,
+            },
+        )
+        observations = payload.get("observations", [])
+        for obs in observations:
+            value = obs.get("value")
+            if value and value != ".":
+                return float(value) / 100.0
+    except Exception:
+        pass
+
+    return fallback_rate
 
 def get_raw_moneyness(S, K, opt_type, closest_strike):
     if K == closest_strike: return "ATM"
@@ -226,7 +307,7 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
         S, sigma, options_dates, div_yield = get_live_data(ticker)
 
     if S == "RATE_LIMIT":
-        st.warning("Yahoo Rate Limit Hit: Please wait 60 seconds before fetching data again.")
+        st.warning("Tradier rate limit hit: Please wait before fetching data again.")
         return
     elif S == "EMPTY" or S == "ERROR":
         st.error(f"Could not find valid data for {ticker}. Please check the symbol.")
@@ -318,10 +399,20 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
     if run_scan:
         with st.spinner("Crunching Black-Scholes model..."):
             try:
-                stock_obj = yf.Ticker(ticker)
-                chain = stock_obj.option_chain(target_date)
+                chain_payload = tradier_get(
+                    '/markets/options/chains',
+                    params={'symbol': ticker, 'expiration': target_date, 'greeks': 'true'},
+                )
 
-                target_chain = chain.puts if opt_type == 'PUTS' else chain.calls
+                options = chain_payload.get('options', {}).get('option')
+                if isinstance(options, dict):
+                    options = [options]
+                if not isinstance(options, list):
+                    options = []
+
+                chain_df = pd.DataFrame(options)
+                tradier_type = 'put' if opt_type == 'PUTS' else 'call'
+                target_chain = chain_df[chain_df['option_type'].str.lower() == tradier_type].copy() if not chain_df.empty else pd.DataFrame()
 
                 if not target_chain.empty:
                     target_chain = target_chain.fillna(0)
@@ -337,12 +428,12 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
 
                     for _, row in target_chain.iterrows():
                         strike = row['strike']
-                        market_price = row.get(price_col, 0)
-                        bid = row.get('bid', 0)
-                        ask = row.get('ask', 0)
-                        oi = row.get('openInterest', 0)
-                        vol = row.get('volume', 0)
-                        iv = row.get('impliedVolatility', 0)
+                        market_price = float(row.get(price_col, 0) or 0)
+                        bid = float(row.get('bid', 0) or 0)
+                        ask = float(row.get('ask', 0) or 0)
+                        oi = int(float(row.get('open_interest', 0) or 0))
+                        vol = int(float(row.get('volume', 0) or 0))
+                        iv = float(row.get('greeks', {}).get('mid_iv', 0) or 0) if isinstance(row.get('greeks'), dict) else 0
 
                         if market_price == 0 or iv == 0 or oi < MIN_OPEN_INTEREST or vol < MIN_VOLUME: continue
 
@@ -413,8 +504,8 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
                     st.warning("No options chain returned for this date.")
 
             except Exception as e:
-                if "RateLimit" in str(type(e).__name__) or "429" in str(e):
-                    st.warning("Yahoo Rate Limit Hit: Please wait 60 seconds before scanning the chain.")
+                if "429" in str(e):
+                    st.warning("Tradier rate limit hit: Please wait before scanning the chain.")
                 else:
                     st.error(f"Error crunching data: {e}")
 
@@ -468,6 +559,10 @@ def process_ticker(ticker, action, opt_type, key_suffix=""):
 # --- MAIN APP UI ---
 st.title("📈 LQ Quant Options Scanner")
 st.markdown("Identify mathematical edge via Black-Scholes pricing.")
+
+if not TRADIER_API_KEY:
+    st.error("Missing Tradier API key. Set environment variable TRADIER_API_KEY before using the scanner.")
+    st.stop()
 
 col1, col2 = st.columns(2)
 with col1:
