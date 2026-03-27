@@ -749,7 +749,7 @@ def build_forward_vol_forecast(hist: pd.DataFrame, cfg: ScannerConfig) -> Dict[s
 # SCREENING HELPERS
 # ============================================================
 def label_moneyness(S: float, K: float, option_type: str) -> str:
-    if abs(K - S) < 1.0:
+    if int(K) == int(S):
         return "ATM"
 
     option_type = option_type.upper()
