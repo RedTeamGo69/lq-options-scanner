@@ -63,6 +63,11 @@ class ScannerConfig:
     rv120_weight: float = 0.20
     vol_forecast_multiplier: float = 1.00
 
+    enable_earnings_vol_adj: bool = True
+    expected_earnings_move: float = 0.05
+
+    enable_term_structure_scaling: bool = True
+
     use_executable_pricing: bool = True
     execution_slippage_pct: float = 0.0
 
@@ -745,6 +750,34 @@ def build_forward_vol_forecast(hist: pd.DataFrame, cfg: ScannerConfig) -> Dict[s
     }
 
 
+def adjust_forecast_vol_for_earnings(
+    forecast_vol: float,
+    T: float,
+    earnings_date_str: Optional[str],
+    expiration_date_str: str,
+    expected_earnings_move: float,
+) -> Tuple[float, bool]:
+    if not earnings_date_str or T < T_FLOOR_YEARS or expected_earnings_move <= 0:
+        return forecast_vol, False
+
+    try:
+        earnings_dt = datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+        expiry_dt = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
+        today = datetime.now(NY_TZ).date()
+    except (ValueError, TypeError):
+        return forecast_vol, False
+
+    if not (today <= earnings_dt <= expiry_dt):
+        return forecast_vol, False
+
+    diffusion_var = forecast_vol ** 2 * T
+    jump_var = expected_earnings_move ** 2
+    total_var = diffusion_var + jump_var
+    adjusted_vol = math.sqrt(total_var / T)
+
+    return adjusted_vol, True
+
+
 # ============================================================
 # SCREENING HELPERS
 # ============================================================
@@ -927,6 +960,31 @@ def build_term_structure_snapshot(
             continue
 
     return pd.DataFrame(rows).sort_values("DTE").reset_index(drop=True) if rows else pd.DataFrame()
+
+
+def compute_term_structure_scaling_factor(
+    term_df: pd.DataFrame,
+    target_expiration: str,
+) -> Optional[float]:
+    if term_df.empty or "ATM Avg IV (%)" not in term_df.columns:
+        return None
+
+    avg_col = term_df["ATM Avg IV (%)"].dropna()
+    if avg_col.empty:
+        return None
+
+    mean_iv = avg_col.mean()
+    if mean_iv <= 0:
+        return None
+
+    row = term_df[term_df["Expiration"] == target_expiration]
+    if row.empty or pd.isna(row.iloc[0]["ATM Avg IV (%)"]):
+        return None
+
+    this_iv = float(row.iloc[0]["ATM Avg IV (%)"])
+    factor = this_iv / mean_iv
+
+    return float(np.clip(factor, 0.5, 2.0))
 
 
 def build_skew_snapshot(chain_df: pd.DataFrame, S: float, option_type: str = "PUT") -> pd.DataFrame:
@@ -1224,6 +1282,9 @@ def display_summary(
     forecast_vol: Optional[float],
     yahoo_events: Dict[str, Optional[str]],
     iv_stats: Dict[str, Optional[float]],
+    base_forecast_vol: Optional[float] = None,
+    ts_factor: Optional[float] = None,
+    earnings_adj_applied: bool = False,
 ) -> None:
     if company_name.upper() == ticker.upper():
         st.subheader(ticker)
@@ -1234,7 +1295,19 @@ def display_summary(
     c1.metric("Spot", f"${S:,.2f}")
     c2.metric("Dividend Yield", f"{q*100:.2f}%")
     c3.metric("Risk-Free", f"{r*100:.2f}%")
-    c4.metric("Forecast Vol", f"{forecast_vol*100:.1f}%" if forecast_vol is not None else "N/A")
+
+    vol_delta = None
+    if forecast_vol is not None and base_forecast_vol is not None and forecast_vol != base_forecast_vol:
+        vol_delta = f"+{(forecast_vol - base_forecast_vol)*100:.1f} pts"
+    c4.metric("Forecast Vol", f"{forecast_vol*100:.1f}%" if forecast_vol is not None else "N/A", delta=vol_delta)
+
+    adj_parts = []
+    if ts_factor is not None and ts_factor != 1.0:
+        adj_parts.append(f"Term structure: {ts_factor:.2f}x")
+    if earnings_adj_applied:
+        adj_parts.append("Earnings-adjusted")
+    if adj_parts:
+        c4.caption(" | ".join(adj_parts))
 
     c5, c6, c7, c8 = st.columns(4)
     c5.metric("RV20", f"{rv20*100:.1f}%" if rv20 is not None else "N/A")
@@ -1411,6 +1484,25 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                         lookback_days=cfg.iv_history_lookback_days,
                     )
 
+                effective_forecast_vol = forecast_vol
+                ts_factor = None
+                earnings_adj_applied = False
+
+                if forecast_vol is not None:
+                    if cfg.enable_term_structure_scaling and not term_df.empty:
+                        ts_factor = compute_term_structure_scaling_factor(term_df, target_date)
+                        if ts_factor is not None:
+                            effective_forecast_vol = forecast_vol * ts_factor
+
+                    if cfg.enable_earnings_vol_adj:
+                        effective_forecast_vol, earnings_adj_applied = adjust_forecast_vol_for_earnings(
+                            forecast_vol=effective_forecast_vol,
+                            T=T,
+                            earnings_date_str=yahoo_events.get("next_earnings_date"),
+                            expiration_date_str=target_date,
+                            expected_earnings_move=cfg.expected_earnings_move,
+                        )
+
                 best_df = screen_chain(
                     chain_df=chain_df,
                     S=S,
@@ -1420,7 +1512,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                     dte=dte,
                     action=action,
                     option_family=option_family,
-                    forecast_vol=forecast_vol,
+                    forecast_vol=effective_forecast_vol if effective_forecast_vol is not None else forecast_vol,
                     rv20=rv20,
                     rv60=rv60,
                     rv120=rv120,
@@ -1439,7 +1531,10 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                     "iv_hist_df": iv_hist_df,
                     "S": S,
                     "T": T,
-                    "forecast_vol": forecast_vol,
+                    "base_forecast_vol": forecast_vol,
+                    "forecast_vol": effective_forecast_vol if effective_forecast_vol is not None else forecast_vol,
+                    "ts_factor": ts_factor,
+                    "earnings_adj_applied": earnings_adj_applied,
                     "expiration": target_date,
                     "yahoo_events": yahoo_events,
                     "iv_stats": iv_stats,
@@ -1493,6 +1588,9 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         forecast_vol=cached["forecast_vol"],
         yahoo_events=cached["yahoo_events"],
         iv_stats=cached["iv_stats"],
+        base_forecast_vol=cached.get("base_forecast_vol"),
+        ts_factor=cached.get("ts_factor"),
+        earnings_adj_applied=cached.get("earnings_adj_applied", False),
     )
 
     display_event_warnings(cached["yahoo_events"], cached["expiration"])
@@ -1628,6 +1726,11 @@ with st.sidebar:
     rv120_weight = st.slider("RV120 Weight", 0.0, 1.0, 0.20, 0.05)
     vol_forecast_multiplier = st.slider("Forecast Vol Multiplier", 0.50, 1.50, 1.00, 0.01)
 
+    st.subheader("Vol Adjustments")
+    enable_earnings_vol_adj = st.toggle("Adjust forecast for earnings", value=True)
+    expected_earnings_move = st.slider("Expected Earnings Move %", 1.0, 20.0, 5.0, 0.5) / 100.0
+    enable_term_structure_scaling = st.toggle("Scale forecast by term structure", value=True)
+
     st.subheader("Execution Model")
     use_executable_pricing = st.toggle("Use bid/ask execution pricing", value=True)
     execution_slippage_pct = st.slider("Slippage %", 0.0, 5.0, 0.0, 0.1)
@@ -1647,6 +1750,9 @@ cfg = ScannerConfig(
     rv60_weight=float(rv60_weight),
     rv120_weight=float(rv120_weight),
     vol_forecast_multiplier=float(vol_forecast_multiplier),
+    enable_earnings_vol_adj=bool(enable_earnings_vol_adj),
+    expected_earnings_move=float(expected_earnings_move),
+    enable_term_structure_scaling=bool(enable_term_structure_scaling),
     use_executable_pricing=bool(use_executable_pricing),
     execution_slippage_pct=float(execution_slippage_pct),
     iv_history_lookback_days=int(iv_history_lookback_days),
