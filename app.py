@@ -2,6 +2,9 @@ from pandas.io.formats.style import Styler
 import math
 import os
 import sqlite3
+import logging
+import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +16,8 @@ import requests
 import streamlit as st
 import yfinance as yf
 from scipy.stats import norm
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # PAGE CONFIG
@@ -37,6 +42,7 @@ NY_TZ = pytz.timezone("America/New_York")
 TRADING_DAYS_PER_YEAR = 252.0
 CALENDAR_DAYS_PER_YEAR = 365.0
 T_FLOOR_YEARS = 1.0 / (365.0 * 24.0 * 60.0 * 60.0)  # 1 second
+TICKER_PATTERN = re.compile(r'^[A-Z]{1,5}$')
 
 
 # ============================================================
@@ -105,7 +111,12 @@ def fred_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
         query.update(params)
 
     response = session.get(f"{FRED_BASE_URL}{path}", params=query, timeout=10)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        raise requests.HTTPError(
+            f"FRED API error: {response.status_code} for {FRED_BASE_URL}{path}"
+        ) from None
     return response.json()
 
 
@@ -284,38 +295,46 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def db_connection():
+    conn = get_db_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 @st.cache_resource
 def init_db() -> bool:
-    conn = get_db_connection()
-    cur = conn.cursor()
+    with db_connection() as conn:
+        cur = conn.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS iv_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_date TEXT NOT NULL,
-            ticker TEXT NOT NULL,
-            expiration TEXT NOT NULL,
-            dte INTEGER NOT NULL,
-            atm_call_iv REAL,
-            atm_put_iv REAL,
-            atm_avg_iv REAL,
-            spot REAL,
-            UNIQUE(snapshot_date, ticker, expiration)
-        )
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS iv_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                expiration TEXT NOT NULL,
+                dte INTEGER NOT NULL,
+                atm_call_iv REAL,
+                atm_put_iv REAL,
+                atm_avg_iv REAL,
+                spot REAL,
+                UNIQUE(snapshot_date, ticker, expiration)
+            )
+        """)
 
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_exp
-        ON iv_snapshots (ticker, expiration, snapshot_date)
-    """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_exp
+            ON iv_snapshots (ticker, expiration, snapshot_date)
+        """)
 
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
-        ON iv_snapshots (ticker, snapshot_date)
-    """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
+            ON iv_snapshots (ticker, snapshot_date)
+        """)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
     return True
 
 
@@ -329,26 +348,25 @@ def save_iv_snapshot(
     spot: float,
 ) -> None:
     snapshot_date = datetime.now(NY_TZ).date().isoformat()
-    conn = get_db_connection()
-    cur = conn.cursor()
+    with db_connection() as conn:
+        cur = conn.cursor()
 
-    cur.execute("""
-        INSERT OR REPLACE INTO iv_snapshots
-        (snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        snapshot_date,
-        ticker.upper(),
-        expiration,
-        int(dte),
-        atm_call_iv,
-        atm_put_iv,
-        atm_avg_iv,
-        float(spot),
-    ))
+        cur.execute("""
+            INSERT OR REPLACE INTO iv_snapshots
+            (snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            snapshot_date,
+            ticker.upper(),
+            expiration,
+            int(dte),
+            atm_call_iv,
+            atm_put_iv,
+            atm_avg_iv,
+            float(spot),
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def get_local_iv_history(
@@ -357,26 +375,23 @@ def get_local_iv_history(
     expiration: Optional[str] = None,
 ) -> pd.DataFrame:
     cutoff = (datetime.now(NY_TZ).date() - timedelta(days=lookback_days + 30)).isoformat()
-    conn = get_db_connection()
-
-    if expiration:
-        query = """
-            SELECT snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot
-            FROM iv_snapshots
-            WHERE ticker = ? AND expiration = ? AND snapshot_date >= ?
-            ORDER BY snapshot_date
-        """
-        df = pd.read_sql_query(query, conn, params=(ticker.upper(), expiration, cutoff))
-    else:
-        query = """
-            SELECT snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot
-            FROM iv_snapshots
-            WHERE ticker = ? AND snapshot_date >= ?
-            ORDER BY snapshot_date
-        """
-        df = pd.read_sql_query(query, conn, params=(ticker.upper(), cutoff))
-
-    conn.close()
+    with db_connection() as conn:
+        if expiration:
+            query = """
+                SELECT snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot
+                FROM iv_snapshots
+                WHERE ticker = ? AND expiration = ? AND snapshot_date >= ?
+                ORDER BY snapshot_date
+            """
+            df = pd.read_sql_query(query, conn, params=(ticker.upper(), expiration, cutoff))
+        else:
+            query = """
+                SELECT snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot
+                FROM iv_snapshots
+                WHERE ticker = ? AND snapshot_date >= ?
+                ORDER BY snapshot_date
+            """
+            df = pd.read_sql_query(query, conn, params=(ticker.upper(), cutoff))
 
     if not df.empty:
         df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
@@ -440,7 +455,7 @@ def get_company_name(ticker_symbol: str) -> str:
             if desc:
                 return desc
     except Exception:
-        pass
+        logger.debug("Failed to fetch company name for %s", ticker_symbol, exc_info=True)
     return ticker_symbol
 
 
@@ -466,7 +481,7 @@ def get_risk_free_rate() -> float:
             if value and value != ".":
                 return float(value) / 100.0
     except Exception:
-        pass
+        logger.warning("FRED risk-free rate fetch failed, using fallback %.2f%%", fallback_rate * 100, exc_info=True)
 
     return fallback_rate
 
@@ -619,7 +634,7 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
                 else:
                     earnings_dt = edf.iloc[-1][first_col]
         except Exception:
-            pass
+            logger.debug("yfinance earnings date fetch failed for %s", ticker_symbol, exc_info=True)
 
         if earnings_dt is None:
             try:
@@ -634,7 +649,7 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
                         if earnings_dt is not None:
                             break
             except Exception:
-                pass
+                logger.debug("yfinance calendar fallback failed for %s", ticker_symbol, exc_info=True)
 
         if earnings_dt is not None and pd.notna(earnings_dt):
             result["next_earnings_date"] = pd.Timestamp(earnings_dt).date().isoformat()
@@ -655,7 +670,7 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
                     if pd.notna(parsed):
                         result["ex_dividend_date"] = parsed.date().isoformat()
         except Exception:
-            pass
+            logger.debug("yfinance fast_info ex-div fetch failed for %s", ticker_symbol, exc_info=True)
 
         if result["ex_dividend_date"] is None:
             try:
@@ -672,10 +687,10 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
                         if not future_divs.empty:
                             result["ex_dividend_date"] = future_divs.iloc[0][date_col].date().isoformat()
             except Exception:
-                pass
+                logger.debug("yfinance dividend actions fallback failed for %s", ticker_symbol, exc_info=True)
 
     except Exception:
-        pass
+        logger.warning("Yahoo event enrichment failed entirely for %s", ticker_symbol, exc_info=True)
 
     return result
 
@@ -710,13 +725,17 @@ def build_forward_vol_forecast(hist: pd.DataFrame, cfg: ScannerConfig) -> Dict[s
         values.append(rv120)
         weights.append(cfg.rv120_weight)
 
-    if not values or sum(weights) == 0:
+    if not values:
         forecast = None
     else:
         w = np.array(weights, dtype=float)
-        w = w / w.sum()
-        forecast = float(np.dot(np.array(values, dtype=float), w))
-        forecast *= cfg.vol_forecast_multiplier
+        w_sum = w.sum()
+        if w_sum == 0:
+            forecast = None
+        else:
+            w = w / w_sum
+            forecast = float(np.dot(np.array(values, dtype=float), w))
+            forecast *= cfg.vol_forecast_multiplier
 
     return {
         "rv20": rv20,
@@ -907,6 +926,7 @@ def build_term_structure_snapshot(
                 )
 
         except Exception:
+            logger.debug("Term structure snapshot failed for expiration", exc_info=True)
             continue
 
     return pd.DataFrame(rows).sort_values("DTE").reset_index(drop=True) if rows else pd.DataFrame()
@@ -1008,21 +1028,27 @@ def screen_chain(
     strikes_series = df["strike"].astype(float)
     rows = []
 
-    for _, row in df.iterrows():
-        K = float(row["strike"])
-        bid = float(row["bid"])
-        ask = float(row["ask"])
-        mid = float(row["mid"])
-        exec_px = float(row["exec_px"])
-        market_iv = float(row["mid_iv"])
-        oi = safe_int(row.get("open_interest"))
-        vol = safe_int(row.get("volume"))
+    for row in df.itertuples(index=False):
+        K = float(row.strike)
+        bid = float(row.bid)
+        ask = float(row.ask)
+        mid = float(row.mid)
+        exec_px = float(row.exec_px)
+        market_iv = float(row.mid_iv)
+        oi = safe_int(getattr(row, "open_interest", None))
+        vol = safe_int(getattr(row, "volume", None))
 
         market_calc = BlackScholesCalculator(S=S, K=K, T=T, r=r, sigma=market_iv, q=q)
         market_theo = market_calc.price(option_type)
 
+        row_series = pd.Series({
+            "delta_mkt": getattr(row, "delta_mkt", np.nan),
+            "gamma_mkt": getattr(row, "gamma_mkt", np.nan),
+            "theta_mkt": getattr(row, "theta_mkt", np.nan),
+            "vega_mkt": getattr(row, "vega_mkt", np.nan),
+        })
         market_greeks = get_market_greeks(
-            row=row,
+            row=row_series,
             S=S,
             K=K,
             T=T,
@@ -1065,7 +1091,7 @@ def screen_chain(
                 "Forecast Theo": forecast_theo,
                 "Abs Edge ($)": abs_edge,
                 "Value Edge (%)": value_edge_pct,
-                "Spread (%)": float(row["spread_pct"]),
+                "Spread (%)": float(row.spread_pct),
                 "Mkt IV (%)": market_iv * 100.0,
                 "Forecast Vol (%)": forecast_vol * 100.0,
                 "RV20 (%)": rv20 * 100.0 if rv20 is not None else np.nan,
@@ -1152,7 +1178,7 @@ def style_results(df: pd.DataFrame) -> Styler:
         "Moneyness": color_moneyness,
     }.items():
         if col in df.columns:
-            styler = styler.applymap(func, subset=[col])
+            styler = styler.map(func, subset=[col])
 
     return styler.format(
         {
@@ -1238,7 +1264,7 @@ def display_event_warnings(yahoo_events: Dict[str, Optional[str]], target_date: 
             if today_ny <= earn_dt <= expiry_dt:
                 st.warning(f"Earnings risk: earnings date appears to fall before expiration ({earn_str}).")
         except Exception:
-            pass
+            logger.debug("Failed to parse earnings date: %s", earn_str, exc_info=True)
 
     ex_div_str = yahoo_events.get("ex_dividend_date")
     if ex_div_str:
@@ -1247,7 +1273,7 @@ def display_event_warnings(yahoo_events: Dict[str, Optional[str]], target_date: 
             if today_ny <= ex_dt <= expiry_dt:
                 st.warning(f"Dividend event risk: ex-dividend date appears before expiration ({ex_div_str}).")
         except Exception:
-            pass
+            logger.debug("Failed to parse ex-dividend date: %s", ex_div_str, exc_info=True)
 
 
 def display_expected_moves(S: float, T: float, forecast_vol: float, best_df: pd.DataFrame) -> None:
@@ -1260,6 +1286,9 @@ def display_expected_moves(S: float, T: float, forecast_vol: float, best_df: pd.
     else:
         temp = best_df.copy()
         temp["dist_to_50"] = (temp["Delta"].abs() - 0.50).abs()
+        temp = temp.dropna(subset=["dist_to_50"])
+        if temp.empty:
+            return
         atm_iv = temp.sort_values("dist_to_50").iloc[0]["Mkt IV (%)"] / 100.0
 
     market_em = S * atm_iv * math.sqrt(T)
@@ -1638,9 +1667,16 @@ with st.form("search_form"):
 
 if submit_search:
     if ticker_input:
-        tickers = [t.strip() for t in ticker_input.split(",") if t.strip()]
-        tickers = dedupe_preserve_order(tickers)
-        st.session_state["active_tickers"] = tickers
+        raw_tickers = [t.strip() for t in ticker_input.split(",") if t.strip()]
+        invalid = [t for t in raw_tickers if not TICKER_PATTERN.match(t)]
+        tickers = [t for t in raw_tickers if TICKER_PATTERN.match(t)]
+        if invalid:
+            st.warning(f"Skipped invalid ticker(s): {', '.join(invalid)}. Use 1-5 letter symbols (e.g. AAPL, SPY).")
+        if tickers:
+            tickers = dedupe_preserve_order(tickers)
+            st.session_state["active_tickers"] = tickers
+        else:
+            st.warning("No valid ticker symbols entered.")
     else:
         st.warning("Please enter at least one ticker.")
 
