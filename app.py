@@ -748,11 +748,8 @@ def build_forward_vol_forecast(hist: pd.DataFrame, cfg: ScannerConfig) -> Dict[s
 # ============================================================
 # SCREENING HELPERS
 # ============================================================
-def label_moneyness(S: float, K: float, option_type: str, strikes: pd.Series) -> str:
-    if strikes.empty:
-        return "N/A"
-    min_dist = (strikes - S).abs().min()
-    if np.isclose(abs(K - S), min_dist):
+def label_moneyness(S: float, K: float, option_type: str) -> str:
+    if abs(K - S) < 1.0:
         return "ATM"
 
     option_type = option_type.upper()
@@ -1025,7 +1022,6 @@ def screen_chain(
     if df.empty:
         return pd.DataFrame()
 
-    strikes_series = df["strike"].astype(float)
     rows = []
 
     for row in df.itertuples(index=False):
@@ -1081,7 +1077,7 @@ def screen_chain(
 
         rows.append(
             {
-                "Moneyness": label_moneyness(S, K, option_type, strikes_series),
+                "Moneyness": label_moneyness(S, K, option_type),
                 "Strike": K,
                 "Bid": bid,
                 "Ask": ask,
