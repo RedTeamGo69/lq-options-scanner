@@ -1,0 +1,28 @@
+name: Daily IV Scan
+
+on:
+  schedule:
+    # Run at 9:05 PM UTC (4:05 PM ET) — after US market close
+    - cron: "5 21 * * 1-5"
+  workflow_dispatch: # Allow manual trigger from GitHub Actions tab
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests psycopg2-binary numpy
+
+      - name: Run daily IV scan
+        env:
+          TRADIER_API_KEY: ${{ secrets.TRADIER_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/daily_iv_scan.py
