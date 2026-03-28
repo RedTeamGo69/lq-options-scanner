@@ -127,7 +127,11 @@ def save_iv_snapshot(
     atm_avg_iv: Optional[float],
     spot: float,
 ) -> None:
-    snapshot_date = datetime.now(NY_TZ).date().isoformat()
+    today = datetime.now(NY_TZ).date()
+    # Skip weekends to keep IV history clean
+    if today.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        return
+    snapshot_date = today.isoformat()
     with db_connection() as conn:
         cur = conn.cursor()
 
