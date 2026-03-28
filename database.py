@@ -1,5 +1,6 @@
-import sqlite3
 import logging
+import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Dict, Optional
@@ -12,11 +13,28 @@ from config import DB_PATH, NY_TZ
 
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# DATABASE BACKEND SELECTION
+# ============================================================
+# If DATABASE_URL is set, use PostgreSQL (Supabase, Neon, etc.)
+# Otherwise, fall back to local SQLite.
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+
+def _use_postgres() -> bool:
+    return bool(DATABASE_URL)
+
 
 # ============================================================
-# SQLITE IV HISTORY
+# CONNECTION HELPERS
 # ============================================================
-def get_db_connection() -> sqlite3.Connection:
+def _get_pg_connection():
+    import psycopg2
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+
+def _get_sqlite_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
@@ -24,47 +42,82 @@ def get_db_connection() -> sqlite3.Connection:
 
 @contextmanager
 def db_connection():
-    conn = get_db_connection()
+    if _use_postgres():
+        conn = _get_pg_connection()
+    else:
+        conn = _get_sqlite_connection()
     try:
         yield conn
     finally:
         conn.close()
 
 
+# ============================================================
+# INIT
+# ============================================================
 @st.cache_resource
 def init_db() -> bool:
     with db_connection() as conn:
         cur = conn.cursor()
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS iv_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_date TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                expiration TEXT NOT NULL,
-                dte INTEGER NOT NULL,
-                atm_call_iv REAL,
-                atm_put_iv REAL,
-                atm_avg_iv REAL,
-                spot REAL,
-                UNIQUE(snapshot_date, ticker, expiration)
-            )
-        """)
+        if _use_postgres():
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS iv_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    snapshot_date TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    dte INTEGER NOT NULL,
+                    atm_call_iv DOUBLE PRECISION,
+                    atm_put_iv DOUBLE PRECISION,
+                    atm_avg_iv DOUBLE PRECISION,
+                    spot DOUBLE PRECISION,
+                    UNIQUE(snapshot_date, ticker, expiration)
+                )
+            """)
 
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_exp
-            ON iv_snapshots (ticker, expiration, snapshot_date)
-        """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_exp
+                ON iv_snapshots (ticker, expiration, snapshot_date)
+            """)
 
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
-            ON iv_snapshots (ticker, snapshot_date)
-        """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
+                ON iv_snapshots (ticker, snapshot_date)
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS iv_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_date TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    dte INTEGER NOT NULL,
+                    atm_call_iv REAL,
+                    atm_put_iv REAL,
+                    atm_avg_iv REAL,
+                    spot REAL,
+                    UNIQUE(snapshot_date, ticker, expiration)
+                )
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_exp
+                ON iv_snapshots (ticker, expiration, snapshot_date)
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
+                ON iv_snapshots (ticker, snapshot_date)
+            """)
 
         conn.commit()
     return True
 
 
+# ============================================================
+# SAVE
+# ============================================================
 def save_iv_snapshot(
     ticker: str,
     expiration: str,
@@ -78,44 +131,73 @@ def save_iv_snapshot(
     with db_connection() as conn:
         cur = conn.cursor()
 
-        cur.execute("""
-            INSERT OR REPLACE INTO iv_snapshots
-            (snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            snapshot_date,
-            ticker.upper(),
-            expiration,
-            int(dte),
-            atm_call_iv,
-            atm_put_iv,
-            atm_avg_iv,
-            float(spot),
-        ))
+        if _use_postgres():
+            cur.execute("""
+                INSERT INTO iv_snapshots
+                (snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (snapshot_date, ticker, expiration)
+                DO UPDATE SET
+                    dte = EXCLUDED.dte,
+                    atm_call_iv = EXCLUDED.atm_call_iv,
+                    atm_put_iv = EXCLUDED.atm_put_iv,
+                    atm_avg_iv = EXCLUDED.atm_avg_iv,
+                    spot = EXCLUDED.spot
+            """, (
+                snapshot_date,
+                ticker.upper(),
+                expiration,
+                int(dte),
+                atm_call_iv,
+                atm_put_iv,
+                atm_avg_iv,
+                float(spot),
+            ))
+        else:
+            cur.execute("""
+                INSERT OR REPLACE INTO iv_snapshots
+                (snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                snapshot_date,
+                ticker.upper(),
+                expiration,
+                int(dte),
+                atm_call_iv,
+                atm_put_iv,
+                atm_avg_iv,
+                float(spot),
+            ))
 
         conn.commit()
 
 
+# ============================================================
+# QUERY
+# ============================================================
 def get_local_iv_history(
     ticker: str,
     lookback_days: int = 252,
     expiration: Optional[str] = None,
 ) -> pd.DataFrame:
     cutoff = (datetime.now(NY_TZ).date() - timedelta(days=lookback_days + 30)).isoformat()
+
     with db_connection() as conn:
+        ph = "%s" if _use_postgres() else "?"
+
         if expiration:
-            query = """
+            query = f"""
                 SELECT snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot
                 FROM iv_snapshots
-                WHERE ticker = ? AND expiration = ? AND snapshot_date >= ?
+                WHERE ticker = {ph} AND expiration = {ph} AND snapshot_date >= {ph}
                 ORDER BY snapshot_date
             """
             df = pd.read_sql_query(query, conn, params=(ticker.upper(), expiration, cutoff))
         else:
-            query = """
+            query = f"""
                 SELECT snapshot_date, ticker, expiration, dte, atm_call_iv, atm_put_iv, atm_avg_iv, spot
                 FROM iv_snapshots
-                WHERE ticker = ? AND snapshot_date >= ?
+                WHERE ticker = {ph} AND snapshot_date >= {ph}
                 ORDER BY snapshot_date
             """
             df = pd.read_sql_query(query, conn, params=(ticker.upper(), cutoff))
