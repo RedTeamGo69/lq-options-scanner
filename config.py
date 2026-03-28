@@ -56,7 +56,6 @@ class ScannerConfig:
     iv_history_lookback_days: int = 252
 
     # Vertical Spreads
-    enable_spread_scanner: bool = True
     spread_max_width: int = 10         # max strike width in dollars
     spread_min_credit: float = 0.10    # min net credit for credit spreads
     spread_top_n: int = 15             # top N spreads to display

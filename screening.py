@@ -13,6 +13,7 @@ from pricing import (
     get_market_greeks,
     compute_confidence_score,
     short_option_yield_metrics,
+    label_atm_strike,
 )
 from data import get_option_chain
 from database import save_iv_snapshot
@@ -303,6 +304,7 @@ def screen_chain(
     if out.empty:
         return out
 
+    out = label_atm_strike(out, S)
     out["Confidence"] = compute_confidence_score(out, cfg)
     out = out.sort_values(
         by=["Confidence", "Value Edge (%)", "Spread (%)", "OI"],

@@ -35,8 +35,8 @@ if not TRADIER_API_KEY:
 with st.sidebar:
     st.header("Scanner Settings")
 
-    action = st.radio("Action", ["SELL", "BUY"], horizontal=True)
-    option_family = st.radio("Type", ["PUTS", "CALLS"], horizontal=True)
+    action = st.radio("Action", ["SELL", "BUY", "SELL SPREAD"], horizontal=True)
+    option_family = st.radio("Type", ["PUTS", "CALLS"], horizontal=True, disabled=(action == "SELL SPREAD"))
 
     st.subheader("Liquidity Filters")
     min_open_interest = st.number_input("Min OI", min_value=0, value=100, step=10)
@@ -62,8 +62,7 @@ with st.sidebar:
     use_executable_pricing = st.toggle("Use bid/ask execution pricing", value=True)
     execution_slippage_pct = st.slider("Slippage %", 0.0, 5.0, 0.0, 0.1)
 
-    st.subheader("Vertical Spreads")
-    enable_spread_scanner = st.toggle("Enable spread scanner", value=True)
+    st.subheader("Spread Filters")
     spread_max_width = st.number_input("Max Spread Width ($)", min_value=1, max_value=50, value=10, step=1)
     spread_min_credit = st.number_input("Min Net Credit ($)", min_value=0.01, value=0.10, step=0.05, format="%.2f")
     spread_top_n = st.number_input("Top N Spreads", min_value=5, max_value=50, value=15, step=5)
@@ -94,7 +93,6 @@ cfg = ScannerConfig(
     use_executable_pricing=bool(use_executable_pricing),
     execution_slippage_pct=float(execution_slippage_pct),
     iv_history_lookback_days=int(iv_history_lookback_days),
-    enable_spread_scanner=bool(enable_spread_scanner),
     spread_max_width=int(spread_max_width),
     spread_min_credit=float(spread_min_credit),
     spread_top_n=int(spread_top_n),
