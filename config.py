@@ -54,3 +54,14 @@ class ScannerConfig:
     confidence_weight_delta: float = 0.10
 
     iv_history_lookback_days: int = 252
+
+    # Vertical Spreads
+    enable_spread_scanner: bool = True
+    spread_max_width: int = 10         # max strike width in dollars
+    spread_min_credit: float = 0.10    # min net credit for credit spreads
+    spread_top_n: int = 15             # top N spreads to display
+
+    # Position Sizing
+    account_size: float = 10000.0
+    risk_per_trade_pct: float = 2.0    # max % of account to risk
+    sizing_method: str = "fixed_risk"  # "fixed_risk" or "half_kelly"
