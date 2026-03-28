@@ -543,9 +543,9 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 call_skew_df = build_skew_snapshot(chain_df, S, option_type="CALL")
                 iv_hist_df = get_local_iv_history(ticker, lookback_days=cfg.iv_history_lookback_days)
 
-                # Build vertical spreads
+                # Build vertical spreads only when user selects SELL SPREAD
                 spreads_df = pd.DataFrame()
-                if cfg.enable_spread_scanner:
+                if action == "SELL SPREAD":
                     final_fv = effective_forecast_vol if effective_forecast_vol is not None else forecast_vol
                     spreads_df = build_vertical_spreads(
                         chain_df=chain_df,
@@ -639,135 +639,123 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         st.warning("No contracts passed the filters.")
         return
 
-    if not best_df.empty:
+    is_spread_mode = (action == "SELL SPREAD")
+
+    if not best_df.empty and not is_spread_mode:
         display_expected_moves(cached["S"], cached["T"], cached["forecast_vol"], best_df)
         display_interpretation(best_df, action)
 
-    tab_names = ["Top Contracts", "Vertical Spreads", "P&L Analysis", "Term Structure", "Put Skew", "Call Skew", "Local IV History"]
+    if is_spread_mode:
+        tab_names = ["Vertical Spreads", "P&L Analysis", "Term Structure", "Put Skew", "Call Skew", "Local IV History"]
+    else:
+        tab_names = ["Top Contracts", "P&L Analysis", "Term Structure", "Put Skew", "Call Skew", "Local IV History"]
     tabs = st.tabs(tab_names)
 
-    with tabs[0]:
-        if best_df.empty:
-            st.warning("No single-leg contracts passed the filters.")
+    tab_map = {name: tab for name, tab in zip(tab_names, tabs)}
+
+    # --- First tab: Top Contracts or Vertical Spreads ---
+    first_tab = tab_map.get("Top Contracts") or tab_map.get("Vertical Spreads")
+    with first_tab:
+        if is_spread_mode:
+            st.subheader(f"Vertical Spreads | {ticker} | {cached['expiration']}")
+            if spreads_df.empty:
+                st.warning("No vertical spreads found. Try adjusting spread filters (max width, min credit) in the sidebar.")
+            else:
+                styled_spreads = style_spreads(spreads_df)
+                st.dataframe(
+                    styled_spreads,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Short Strike": st.column_config.NumberColumn("Short Strike", format="$ %.2f"),
+                        "Long Strike": st.column_config.NumberColumn("Long Strike", format="$ %.2f"),
+                        "Net Credit ($)": st.column_config.NumberColumn("Net Credit ($)", format="$ %.2f"),
+                        "Max Profit ($)": st.column_config.NumberColumn("Max Profit ($)", format="$ %.2f"),
+                        "Max Loss ($)": st.column_config.NumberColumn("Max Loss ($)", format="$ %.2f"),
+                        "Breakeven": st.column_config.NumberColumn("Breakeven", format="$ %.2f"),
+                        "PoP (%)": st.column_config.NumberColumn("PoP (%)", format="%.1f%%"),
+                        "Score": st.column_config.NumberColumn("Score", format="%.0f"),
+                    },
+                )
+
+                top_spread = spreads_df.iloc[0]
+                st.markdown("---")
+                st.subheader("Position Sizing (Top Spread)")
+                display_position_sizing(
+                    max_loss=top_spread["Max Loss ($)"],
+                    cfg=cfg,
+                    edge_pct=safe_float(top_spread.get("Model Edge (%)"), 0.0),
+                    win_prob=safe_float(top_spread.get("PoP (%)"), 50.0) / 100.0,
+                )
+
+                spread_csv = spreads_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download Spreads CSV",
+                    data=spread_csv,
+                    file_name=f"{ticker}_spreads_{cached['expiration']}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"dl_spreads_{ticker}_{cached['expiration']}",
+                )
         else:
-            st.subheader(f"Top Contracts | {ticker} | {action} {option_family} | {cached['expiration']}")
-            styled = style_results(best_df)
+            if best_df.empty:
+                st.warning("No single-leg contracts passed the filters.")
+            else:
+                st.subheader(f"Top Contracts | {ticker} | {action} {option_family} | {cached['expiration']}")
+                styled = style_results(best_df)
 
-            st.dataframe(
-                styled,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Strike": st.column_config.NumberColumn("Strike", format="$ %.2f"),
-                    "Bid": st.column_config.NumberColumn("Bid", format="$ %.2f"),
-                    "Ask": st.column_config.NumberColumn("Ask", format="$ %.2f"),
-                    "Mid": st.column_config.NumberColumn("Mid", format="$ %.2f"),
-                    "Exec Px": st.column_config.NumberColumn("Exec Px", format="$ %.2f"),
-                    "Market Theo": st.column_config.NumberColumn("Market Theo", format="$ %.2f"),
-                    "Forecast Theo": st.column_config.NumberColumn("Forecast Theo", format="$ %.2f"),
-                    "Abs Edge ($)": st.column_config.NumberColumn("Abs Edge ($)", format="$ %.2f"),
-                    "Value Edge (%)": st.column_config.NumberColumn("Value Edge (%)", format="%.1f%%"),
-                    "Spread (%)": st.column_config.NumberColumn("Spread (%)", format="%.1f%%"),
-                    "Mkt IV (%)": st.column_config.NumberColumn("Mkt IV (%)", format="%.1f%%"),
-                    "Forecast Vol (%)": st.column_config.NumberColumn("Forecast Vol (%)", format="%.1f%%"),
-                    "Confidence": st.column_config.NumberColumn("Confidence", format="%.0f"),
-                },
-            )
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Strike": st.column_config.NumberColumn("Strike", format="$ %.2f"),
+                        "Bid": st.column_config.NumberColumn("Bid", format="$ %.2f"),
+                        "Ask": st.column_config.NumberColumn("Ask", format="$ %.2f"),
+                        "Mid": st.column_config.NumberColumn("Mid", format="$ %.2f"),
+                        "Exec Px": st.column_config.NumberColumn("Exec Px", format="$ %.2f"),
+                        "Market Theo": st.column_config.NumberColumn("Market Theo", format="$ %.2f"),
+                        "Forecast Theo": st.column_config.NumberColumn("Forecast Theo", format="$ %.2f"),
+                        "Abs Edge ($)": st.column_config.NumberColumn("Abs Edge ($)", format="$ %.2f"),
+                        "Value Edge (%)": st.column_config.NumberColumn("Value Edge (%)", format="%.1f%%"),
+                        "Spread (%)": st.column_config.NumberColumn("Spread (%)", format="%.1f%%"),
+                        "Mkt IV (%)": st.column_config.NumberColumn("Mkt IV (%)", format="%.1f%%"),
+                        "Forecast Vol (%)": st.column_config.NumberColumn("Forecast Vol (%)", format="%.1f%%"),
+                        "Confidence": st.column_config.NumberColumn("Confidence", format="%.0f"),
+                    },
+                )
 
-            csv = best_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name=f"{ticker}_{action}_{option_family}_{cached['expiration']}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"dl_{ticker}_{action}_{option_family}_{cached['expiration']}",
-            )
+                csv = best_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"{ticker}_{action}_{option_family}_{cached['expiration']}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"dl_{ticker}_{action}_{option_family}_{cached['expiration']}",
+                )
 
-    with tabs[1]:
-        st.subheader(f"Vertical Spreads | {ticker} | {cached['expiration']}")
-        if spreads_df.empty:
-            st.warning("No vertical spreads found. Try adjusting spread filters (max width, min credit) in the sidebar.")
-        else:
-            styled_spreads = style_spreads(spreads_df)
-            st.dataframe(
-                styled_spreads,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Short Strike": st.column_config.NumberColumn("Short Strike", format="$ %.2f"),
-                    "Long Strike": st.column_config.NumberColumn("Long Strike", format="$ %.2f"),
-                    "Net Credit ($)": st.column_config.NumberColumn("Net Credit ($)", format="$ %.2f"),
-                    "Max Profit ($)": st.column_config.NumberColumn("Max Profit ($)", format="$ %.2f"),
-                    "Max Loss ($)": st.column_config.NumberColumn("Max Loss ($)", format="$ %.2f"),
-                    "Breakeven": st.column_config.NumberColumn("Breakeven", format="$ %.2f"),
-                    "PoP (%)": st.column_config.NumberColumn("PoP (%)", format="%.1f%%"),
-                    "Score": st.column_config.NumberColumn("Score", format="%.0f"),
-                },
-            )
-
-            # Position sizing for top spread
-            top_spread = spreads_df.iloc[0]
-            st.markdown("---")
-            st.subheader("Position Sizing (Top Spread)")
-            display_position_sizing(
-                max_loss=top_spread["Max Loss ($)"],
-                cfg=cfg,
-                edge_pct=safe_float(top_spread.get("Model Edge (%)"), 0.0),
-                win_prob=safe_float(top_spread.get("PoP (%)"), 50.0) / 100.0,
-            )
-
-            spread_csv = spreads_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Spreads CSV",
-                data=spread_csv,
-                file_name=f"{ticker}_spreads_{cached['expiration']}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"dl_spreads_{ticker}_{cached['expiration']}",
-            )
-
-    with tabs[2]:
+    # --- P&L Analysis tab ---
+    with tab_map["P&L Analysis"]:
         st.subheader(f"P&L Analysis | {ticker} | {cached['expiration']}")
-
-        # Let user pick what to analyze
-        pnl_source = "spread"
-        if not spreads_df.empty and not best_df.empty:
-            pnl_source = st.radio(
-                "Analyze",
-                ["Top Spread", "Single Leg (Top Contract)"],
-                horizontal=True,
-                key=f"pnl_src_{ticker}_{key_suffix}",
-            )
-            pnl_source = "spread" if pnl_source == "Top Spread" else "single"
-        elif spreads_df.empty and not best_df.empty:
-            pnl_source = "single"
-        elif not spreads_df.empty:
-            pnl_source = "spread"
-        else:
-            st.warning("No contracts or spreads available for P&L analysis.")
 
         S_cached = cached["S"]
         T_cached = cached["T"]
         r_cached = cached["r"]
         q_cached = cached["q"]
 
-        if pnl_source == "spread" and not spreads_df.empty:
+        if is_spread_mode and not spreads_df.empty:
             display_spread_pnl(spreads_df.iloc[0], S_cached, T_cached, r_cached, q_cached)
 
-        elif pnl_source == "single" and not best_df.empty:
+        elif not best_df.empty:
             top = best_df.iloc[0]
             opt_type = "PUT" if option_family == "PUTS" else "CALL"
             strike = top["Strike"]
             exec_px = top["Exec Px"]
             iv = top["Mkt IV (%)"] / 100.0
 
-            if action == "SELL":
-                legs = [{"strike": strike, "option_type": opt_type, "action": "SELL",
-                         "premium": exec_px, "iv": iv, "quantity": 1}]
-            else:
-                legs = [{"strike": strike, "option_type": opt_type, "action": "BUY",
-                         "premium": exec_px, "iv": iv, "quantity": 1}]
+            legs = [{"strike": strike, "option_type": opt_type, "action": action,
+                     "premium": exec_px, "iv": iv, "quantity": 1}]
 
             payoff_df = compute_payoff_curve(legs, S_cached, T_cached, r_cached, q_cached)
             scenario_df = compute_scenario_table(legs, S_cached, T_cached, r_cached, q_cached)
@@ -786,14 +774,13 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 st.subheader("Scenario Analysis")
                 st.dataframe(scenario_df, use_container_width=True, hide_index=True)
 
-            # Position sizing for single leg
             if action == "SELL":
                 if opt_type == "PUT":
-                    max_loss_single = strike - exec_px  # put assignment risk
+                    max_loss_single = strike - exec_px
                 else:
-                    max_loss_single = 10.0 * exec_px  # uncapped for naked calls, use heuristic
+                    max_loss_single = 10.0 * exec_px
             else:
-                max_loss_single = exec_px  # max loss is premium paid
+                max_loss_single = exec_px
 
             st.markdown("---")
             st.subheader("Position Sizing")
@@ -803,8 +790,11 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 edge_pct=safe_float(top.get("Value Edge (%)"), 0.0),
                 win_prob=0.5,
             )
+        else:
+            st.warning("No contracts available for P&L analysis.")
 
-    with tabs[3]:
+    # --- Term Structure tab ---
+    with tab_map["Term Structure"]:
         st.subheader("ATM IV Term Structure")
         if term_df.empty:
             st.warning("No term-structure data available.")
@@ -813,7 +803,8 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             chart_df = term_df.set_index("DTE")[["ATM Avg IV (%)"]]
             st.line_chart(chart_df)
 
-    with tabs[4]:
+    # --- Put Skew tab ---
+    with tab_map["Put Skew"]:
         st.subheader("Put Skew Snapshot")
         if put_skew_df.empty:
             st.warning("No put skew data available.")
@@ -821,7 +812,8 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             st.dataframe(put_skew_df, use_container_width=True, hide_index=True)
             st.line_chart(put_skew_df.set_index("Pct From Spot")[["IV (%)"]])
 
-    with tabs[5]:
+    # --- Call Skew tab ---
+    with tab_map["Call Skew"]:
         st.subheader("Call Skew Snapshot")
         if call_skew_df.empty:
             st.warning("No call skew data available.")
@@ -829,7 +821,8 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             st.dataframe(call_skew_df, use_container_width=True, hide_index=True)
             st.line_chart(call_skew_df.set_index("Pct From Spot")[["IV (%)"]])
 
-    with tabs[6]:
+    # --- Local IV History tab ---
+    with tab_map["Local IV History"]:
         st.subheader("Local IV History")
         if iv_hist_df.empty:
             st.warning("No local IV history saved yet. Each scan saves ATM IV snapshots to SQLite.")

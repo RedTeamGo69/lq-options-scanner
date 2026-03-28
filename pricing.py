@@ -168,13 +168,22 @@ def adjust_forecast_vol_for_earnings(
 # SCREENING HELPERS
 # ============================================================
 def label_moneyness(S: float, K: float, option_type: str) -> str:
-    if int(K) == int(S):
-        return "ATM"
-
+    """Label a single strike as ITM or OTM. ATM is assigned separately
+    by label_atm_strike() to the single closest strike."""
     option_type = option_type.upper()
     if option_type == "CALL":
         return "ITM" if K < S else "OTM"
     return "ITM" if K > S else "OTM"
+
+
+def label_atm_strike(df: pd.DataFrame, S: float) -> pd.DataFrame:
+    """Mark the single strike closest to spot as ATM in the Moneyness column."""
+    if df.empty or "Strike" not in df.columns:
+        return df
+    df = df.copy()
+    closest_idx = (df["Strike"] - S).abs().idxmin()
+    df.loc[closest_idx, "Moneyness"] = "ATM"
+    return df
 
 
 def compute_execution_price(row: pd.Series, action: str, use_executable_pricing: bool, slippage_pct: float) -> float:
