@@ -274,3 +274,208 @@ def short_option_yield_metrics(action: str, option_type: str, S: float, K: float
         "Simple Yield (%)": simple_yield,
         "Ann Yield (%)": ann_yield,
     }
+
+
+# ============================================================
+# P&L PAYOFF COMPUTATION
+# ============================================================
+def compute_payoff_curve(
+    legs: list,
+    S: float,
+    T: float,
+    r: float,
+    q: float,
+    n_points: int = 80,
+    sigma_range: float = 2.5,
+) -> pd.DataFrame:
+    """
+    Compute P&L at expiration and mid-life across a range of spot prices.
+
+    Each leg is a dict:
+        {
+            "strike": float,
+            "option_type": "CALL" or "PUT",
+            "action": "BUY" or "SELL",
+            "premium": float,        # price paid/received per share
+            "iv": float,             # implied vol for mid-life repricing
+            "quantity": int,         # number of contracts (default 1)
+        }
+
+    Returns DataFrame with columns: Spot, Expiration P&L, Mid-Life P&L
+    """
+    if not legs:
+        return pd.DataFrame()
+
+    # Estimate vol for spot range from first leg
+    avg_iv = np.mean([leg.get("iv", 0.30) for leg in legs])
+    move = S * avg_iv * np.sqrt(max(T, 1 / 365)) * sigma_range
+    spot_low = max(S - move, S * 0.5)
+    spot_high = S + move
+    spots = np.linspace(spot_low, spot_high, n_points)
+
+    # Mid-life: reprice at T/2
+    T_mid = max(T / 2.0, 1.0 / (365.0 * 24.0 * 60.0))
+
+    expiry_pnl = np.zeros(n_points)
+    midlife_pnl = np.zeros(n_points)
+
+    for leg in legs:
+        K = leg["strike"]
+        opt_type = leg["option_type"].upper()
+        action = leg["action"].upper()
+        premium = leg["premium"]
+        iv = leg.get("iv", 0.30)
+        qty = leg.get("quantity", 1)
+        sign = 1.0 if action == "BUY" else -1.0
+
+        # Expiration payoff (intrinsic)
+        if opt_type == "CALL":
+            intrinsic = np.maximum(spots - K, 0.0)
+        else:
+            intrinsic = np.maximum(K - spots, 0.0)
+
+        # P&L = sign * (intrinsic - premium)
+        expiry_pnl += sign * (intrinsic - premium) * qty
+
+        # Mid-life payoff (BS reprice)
+        for idx, spot_i in enumerate(spots):
+            calc = BlackScholesCalculator(S=spot_i, K=K, T=T_mid, r=r, sigma=iv, q=q)
+            midlife_price = calc.price(opt_type)
+            midlife_pnl[idx] += sign * (midlife_price - premium) * qty
+
+    # Scale to per-contract (100 shares)
+    return pd.DataFrame({
+        "Spot": spots,
+        "Expiration P&L": expiry_pnl * 100.0,
+        "Mid-Life P&L": midlife_pnl * 100.0,
+    })
+
+
+def compute_scenario_table(
+    legs: list,
+    S: float,
+    T: float,
+    r: float,
+    q: float,
+    pct_moves: tuple = (-10, -5, -2, 0, 2, 5, 10),
+) -> pd.DataFrame:
+    """
+    Show P&L at specific percentage moves from current spot.
+    Returns a small summary table.
+    """
+    if not legs:
+        return pd.DataFrame()
+
+    T_mid = max(T / 2.0, 1.0 / (365.0 * 24.0 * 60.0))
+    rows = []
+
+    for pct in pct_moves:
+        spot_i = S * (1.0 + pct / 100.0)
+
+        expiry_pnl = 0.0
+        midlife_pnl = 0.0
+        net_delta = 0.0
+        net_theta = 0.0
+
+        for leg in legs:
+            K = leg["strike"]
+            opt_type = leg["option_type"].upper()
+            action = leg["action"].upper()
+            premium = leg["premium"]
+            iv = leg.get("iv", 0.30)
+            qty = leg.get("quantity", 1)
+            sign = 1.0 if action == "BUY" else -1.0
+
+            # Expiration
+            if opt_type == "CALL":
+                intrinsic = max(spot_i - K, 0.0)
+            else:
+                intrinsic = max(K - spot_i, 0.0)
+            expiry_pnl += sign * (intrinsic - premium) * qty
+
+            # Mid-life
+            calc = BlackScholesCalculator(S=spot_i, K=K, T=T_mid, r=r, sigma=iv, q=q)
+            midlife_pnl += sign * (calc.price(opt_type) - premium) * qty
+            greeks = calc.greeks(opt_type)
+            net_delta += sign * greeks["delta"] * qty
+            net_theta += sign * greeks["theta"] * qty
+
+        rows.append({
+            "Spot Move": f"{pct:+d}%",
+            "Spot": round(spot_i, 2),
+            "Expiry P&L": round(expiry_pnl * 100.0, 2),
+            "Mid-Life P&L": round(midlife_pnl * 100.0, 2),
+            "Net Delta": round(net_delta, 3),
+            "Net Theta": round(net_theta, 4),
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# POSITION SIZING
+# ============================================================
+def compute_position_size(
+    max_loss_per_contract: float,
+    account_size: float,
+    risk_per_trade_pct: float,
+    method: str = "fixed_risk",
+    edge_pct: float = 0.0,
+    win_prob: float = 0.5,
+) -> Dict[str, float]:
+    """
+    Compute suggested number of contracts.
+
+    Methods:
+      - fixed_risk: contracts = (account * risk_pct) / max_loss
+      - half_kelly: contracts = (kelly_fraction / 2) * account / max_loss
+        where kelly = (win_prob * payoff_ratio - lose_prob) / payoff_ratio
+
+    Returns dict with suggested contracts, dollar risk, % of account.
+    """
+    if max_loss_per_contract <= 0 or account_size <= 0 or risk_per_trade_pct <= 0:
+        return {
+            "contracts": 0,
+            "total_risk": 0.0,
+            "pct_of_account": 0.0,
+            "method": method,
+        }
+
+    # max_loss_per_contract is already in dollars (e.g. $300 for a $3 wide spread)
+    max_dollar_risk = account_size * (risk_per_trade_pct / 100.0)
+
+    if method == "half_kelly":
+        # Kelly criterion: f* = (p * b - q) / b
+        # where p = win_prob, q = 1 - p, b = payoff ratio (reward / risk)
+        # We use edge_pct as a proxy: if edge > 0, favorable
+        lose_prob = 1.0 - win_prob
+        if lose_prob <= 0 or win_prob <= 0:
+            kelly_frac = 0.0
+        else:
+            # payoff_ratio from edge: approximate as (credit / max_loss)
+            # but we use win_prob directly for a cleaner formula
+            # Kelly = (p * (1 + b) - 1) / b where b = reward/risk
+            # Simplified: kelly = win_prob - lose_prob / payoff_ratio
+            # With payoff_ratio estimated from edge_pct
+            payoff_ratio = max(edge_pct / 100.0 + 1.0, 0.01)
+            kelly_frac = max(0.0, (win_prob * payoff_ratio - lose_prob) / payoff_ratio)
+
+        half_kelly = kelly_frac / 2.0
+        kelly_dollar_risk = account_size * half_kelly
+        # Cap at fixed risk limit
+        dollar_risk = min(kelly_dollar_risk, max_dollar_risk)
+    else:
+        dollar_risk = max_dollar_risk
+
+    contracts = int(dollar_risk / max_loss_per_contract)
+    contracts = max(contracts, 0)
+
+    actual_risk = contracts * max_loss_per_contract
+    pct_of_account = (actual_risk / account_size) * 100.0 if account_size > 0 else 0.0
+
+    return {
+        "contracts": contracts,
+        "total_risk": actual_risk,
+        "pct_of_account": pct_of_account,
+        "method": method,
+    }

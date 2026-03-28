@@ -62,6 +62,17 @@ with st.sidebar:
     use_executable_pricing = st.toggle("Use bid/ask execution pricing", value=True)
     execution_slippage_pct = st.slider("Slippage %", 0.0, 5.0, 0.0, 0.1)
 
+    st.subheader("Vertical Spreads")
+    enable_spread_scanner = st.toggle("Enable spread scanner", value=True)
+    spread_max_width = st.number_input("Max Spread Width ($)", min_value=1, max_value=50, value=10, step=1)
+    spread_min_credit = st.number_input("Min Net Credit ($)", min_value=0.01, value=0.10, step=0.05, format="%.2f")
+    spread_top_n = st.number_input("Top N Spreads", min_value=5, max_value=50, value=15, step=5)
+
+    st.subheader("Position Sizing")
+    account_size = st.number_input("Account Size ($)", min_value=1000.0, value=10000.0, step=1000.0, format="%.0f")
+    risk_per_trade_pct = st.slider("Max Risk Per Trade %", 0.5, 10.0, 2.0, 0.5)
+    sizing_method = st.radio("Sizing Method", ["fixed_risk", "half_kelly"], format_func=lambda x: "Fixed Risk %" if x == "fixed_risk" else "Half-Kelly", horizontal=True)
+
     st.subheader("Local IV History")
     iv_history_lookback_days = st.number_input("IV History Lookback Days", min_value=30, max_value=1000, value=252, step=10)
 
@@ -83,6 +94,13 @@ cfg = ScannerConfig(
     use_executable_pricing=bool(use_executable_pricing),
     execution_slippage_pct=float(execution_slippage_pct),
     iv_history_lookback_days=int(iv_history_lookback_days),
+    enable_spread_scanner=bool(enable_spread_scanner),
+    spread_max_width=int(spread_max_width),
+    spread_min_credit=float(spread_min_credit),
+    spread_top_n=int(spread_top_n),
+    account_size=float(account_size),
+    risk_per_trade_pct=float(risk_per_trade_pct),
+    sizing_method=str(sizing_method),
 )
 
 # ============================================================
