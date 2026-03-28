@@ -33,7 +33,7 @@ from screening import (
     compute_term_structure_scaling_factor,
     build_skew_snapshot,
 )
-from strategies import build_vertical_spreads
+from strategies import build_vertical_spreads, build_debit_spreads
 
 logger = logging.getLogger(__name__)
 
@@ -287,26 +287,28 @@ def style_spreads(df: pd.DataFrame) -> Styler:
         if col in df.columns:
             styler = styler.map(func, subset=[col])
 
-    return styler.format(
-        {
-            "Short Strike": "{:,.2f}",
-            "Long Strike": "{:,.2f}",
-            "Width ($)": "{:,.2f}",
-            "Net Credit ($)": "{:,.2f}",
-            "Max Profit ($)": "{:,.2f}",
-            "Max Loss ($)": "{:,.2f}",
-            "Breakeven": "{:,.2f}",
-            "Risk/Reward": "{:,.2f}",
-            "PoP (%)": "{:,.1f}",
-            "Model Edge (%)": "{:,.1f}",
-            "Ann Return (%)": "{:,.1f}",
-            "Net Delta": "{:,.3f}",
-            "Net Theta": "{:,.4f}",
-            "Net Gamma": "{:,.4f}",
-            "Net Vega": "{:,.4f}",
-            "Score": "{:,.0f}",
-        }
-    )
+    fmt = {
+        "Short Strike": "{:,.2f}",
+        "Long Strike": "{:,.2f}",
+        "Width ($)": "{:,.2f}",
+        "Max Profit ($)": "{:,.2f}",
+        "Max Loss ($)": "{:,.2f}",
+        "Breakeven": "{:,.2f}",
+        "Risk/Reward": "{:,.2f}",
+        "PoP (%)": "{:,.1f}",
+        "Model Edge (%)": "{:,.1f}",
+        "Ann Return (%)": "{:,.1f}",
+        "Net Delta": "{:,.3f}",
+        "Net Theta": "{:,.4f}",
+        "Net Gamma": "{:,.4f}",
+        "Net Vega": "{:,.4f}",
+        "Score": "{:,.0f}",
+    }
+    if "Net Credit ($)" in df.columns:
+        fmt["Net Credit ($)"] = "{:,.2f}"
+    if "Net Debit ($)" in df.columns:
+        fmt["Net Debit ($)"] = "{:,.2f}"
+    return styler.format(fmt)
 
 
 def display_spread_pnl(spread_row: pd.Series, S: float, T: float, r: float, q: float) -> None:
@@ -314,46 +316,39 @@ def display_spread_pnl(spread_row: pd.Series, S: float, T: float, r: float, q: f
     strategy = spread_row["Strategy"]
     short_K = spread_row["Short Strike"]
     long_K = spread_row["Long Strike"]
-    net_credit = spread_row["Net Credit ($)"]
 
+    is_credit = "Net Credit ($)" in spread_row.index
+    net_premium = spread_row["Net Credit ($)"] if is_credit else spread_row["Net Debit ($)"]
+
+    # Determine option type and leg actions based on strategy
     if strategy == "Bull Put":
-        legs = [
-            {"strike": short_K, "option_type": "PUT", "action": "SELL",
-             "premium": net_credit + (short_K - long_K - net_credit) * 0.5,
-             "iv": 0.30, "quantity": 1},
-            {"strike": long_K, "option_type": "PUT", "action": "BUY",
-             "premium": (short_K - long_K - net_credit) * 0.5,
-             "iv": 0.30, "quantity": 1},
-        ]
-        # Simpler: use net credit directly for the spread payoff
-        legs = [
-            {"strike": short_K, "option_type": "PUT", "action": "SELL",
-             "premium": 0.0, "iv": 0.30, "quantity": 1},
-            {"strike": long_K, "option_type": "PUT", "action": "BUY",
-             "premium": 0.0, "iv": 0.30, "quantity": 1},
-        ]
-    else:
-        legs = [
-            {"strike": short_K, "option_type": "CALL", "action": "SELL",
-             "premium": 0.0, "iv": 0.30, "quantity": 1},
-            {"strike": long_K, "option_type": "CALL", "action": "BUY",
-             "premium": 0.0, "iv": 0.30, "quantity": 1},
-        ]
+        opt_type = "PUT"
+        # Credit spread: sell high put, buy low put
+        sell_K, buy_K = short_K, long_K
+    elif strategy == "Bear Call":
+        opt_type = "CALL"
+        # Credit spread: sell low call, buy high call
+        sell_K, buy_K = short_K, long_K
+    elif strategy == "Bull Call":
+        opt_type = "CALL"
+        # Debit spread: buy low call, sell high call
+        buy_K, sell_K = long_K, short_K
+    else:  # Bear Put
+        opt_type = "PUT"
+        # Debit spread: buy high put, sell low put
+        buy_K, sell_K = long_K, short_K
 
-    # For expiration payoff, we need to account for net credit received
-    # Build proper legs with estimated premiums from BS
-    opt_type = "PUT" if strategy == "Bull Put" else "CALL"
     from pricing import BlackScholesCalculator
-    short_calc = BlackScholesCalculator(S=S, K=short_K, T=T, r=r, sigma=0.30, q=q)
-    long_calc = BlackScholesCalculator(S=S, K=long_K, T=T, r=r, sigma=0.30, q=q)
-    short_price = short_calc.price(opt_type)
-    long_price = long_calc.price(opt_type)
+    sell_calc = BlackScholesCalculator(S=S, K=sell_K, T=T, r=r, sigma=0.30, q=q)
+    buy_calc = BlackScholesCalculator(S=S, K=buy_K, T=T, r=r, sigma=0.30, q=q)
+    sell_price = sell_calc.price(opt_type)
+    buy_price = buy_calc.price(opt_type)
 
     legs = [
-        {"strike": short_K, "option_type": opt_type, "action": "SELL",
-         "premium": short_price, "iv": 0.30, "quantity": 1},
-        {"strike": long_K, "option_type": opt_type, "action": "BUY",
-         "premium": long_price, "iv": 0.30, "quantity": 1},
+        {"strike": sell_K, "option_type": opt_type, "action": "SELL",
+         "premium": sell_price, "iv": 0.30, "quantity": 1},
+        {"strike": buy_K, "option_type": opt_type, "action": "BUY",
+         "premium": buy_price, "iv": 0.30, "quantity": 1},
     ]
 
     payoff_df = compute_payoff_curve(legs, S, T, r, q)
@@ -365,9 +360,9 @@ def display_spread_pnl(spread_row: pd.Series, S: float, T: float, r: float, q: f
         chart_df = payoff_df.set_index("Spot")[["Expiration P&L", "Mid-Life P&L"]]
         st.line_chart(chart_df)
 
-        # Zero line reference
+        premium_label = "Net credit" if is_credit else "Net debit"
         st.caption(
-            f"Net credit: ${net_credit:.2f} | "
+            f"{premium_label}: ${net_premium:.2f} | "
             f"Max profit: ${spread_row['Max Profit ($)']:.2f} | "
             f"Max loss: ${spread_row['Max Loss ($)']:.2f} | "
             f"Breakeven: ${spread_row['Breakeven']:.2f}"
@@ -543,11 +538,18 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 call_skew_df = build_skew_snapshot(chain_df, S, option_type="CALL")
                 iv_hist_df = get_local_iv_history(ticker, lookback_days=cfg.iv_history_lookback_days)
 
-                # Build vertical spreads only when user selects SELL SPREAD
+                # Build vertical spreads only when user selects a spread action
                 spreads_df = pd.DataFrame()
+                final_fv = effective_forecast_vol if effective_forecast_vol is not None else forecast_vol
                 if action == "SELL SPREAD":
-                    final_fv = effective_forecast_vol if effective_forecast_vol is not None else forecast_vol
                     spreads_df = build_vertical_spreads(
+                        chain_df=chain_df,
+                        S=S, r=r, q=q, T=T, dte=dte,
+                        forecast_vol=final_fv,
+                        cfg=cfg,
+                    )
+                elif action == "BUY SPREAD":
+                    spreads_df = build_debit_spreads(
                         chain_df=chain_df,
                         S=S, r=r, q=q, T=T, dte=dte,
                         forecast_vol=final_fv,
@@ -639,7 +641,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         st.warning("No contracts passed the filters.")
         return
 
-    is_spread_mode = (action == "SELL SPREAD")
+    is_spread_mode = action in ("SELL SPREAD", "BUY SPREAD")
 
     if not best_df.empty and not is_spread_mode:
         display_expected_moves(cached["S"], cached["T"], cached["forecast_vol"], best_df)
@@ -657,25 +659,31 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
     first_tab = tab_map.get("Top Contracts") or tab_map.get("Vertical Spreads")
     with first_tab:
         if is_spread_mode:
-            st.subheader(f"Vertical Spreads | {ticker} | {cached['expiration']}")
+            spread_label = "Credit" if action == "SELL SPREAD" else "Debit"
+            st.subheader(f"Vertical {spread_label} Spreads | {ticker} | {cached['expiration']}")
             if spreads_df.empty:
                 st.warning("No vertical spreads found. Try adjusting spread filters (max width, min credit) in the sidebar.")
             else:
                 styled_spreads = style_spreads(spreads_df)
+                # Build column config dynamically based on credit vs debit
+                col_config = {
+                    "Short Strike": st.column_config.NumberColumn("Short Strike", format="$ %.2f"),
+                    "Long Strike": st.column_config.NumberColumn("Long Strike", format="$ %.2f"),
+                    "Max Profit ($)": st.column_config.NumberColumn("Max Profit ($)", format="$ %.2f"),
+                    "Max Loss ($)": st.column_config.NumberColumn("Max Loss ($)", format="$ %.2f"),
+                    "Breakeven": st.column_config.NumberColumn("Breakeven", format="$ %.2f"),
+                    "PoP (%)": st.column_config.NumberColumn("PoP (%)", format="%.1f%%"),
+                    "Score": st.column_config.NumberColumn("Score", format="%.0f"),
+                }
+                if "Net Credit ($)" in spreads_df.columns:
+                    col_config["Net Credit ($)"] = st.column_config.NumberColumn("Net Credit ($)", format="$ %.2f")
+                if "Net Debit ($)" in spreads_df.columns:
+                    col_config["Net Debit ($)"] = st.column_config.NumberColumn("Net Debit ($)", format="$ %.2f")
                 st.dataframe(
                     styled_spreads,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "Short Strike": st.column_config.NumberColumn("Short Strike", format="$ %.2f"),
-                        "Long Strike": st.column_config.NumberColumn("Long Strike", format="$ %.2f"),
-                        "Net Credit ($)": st.column_config.NumberColumn("Net Credit ($)", format="$ %.2f"),
-                        "Max Profit ($)": st.column_config.NumberColumn("Max Profit ($)", format="$ %.2f"),
-                        "Max Loss ($)": st.column_config.NumberColumn("Max Loss ($)", format="$ %.2f"),
-                        "Breakeven": st.column_config.NumberColumn("Breakeven", format="$ %.2f"),
-                        "PoP (%)": st.column_config.NumberColumn("PoP (%)", format="%.1f%%"),
-                        "Score": st.column_config.NumberColumn("Score", format="%.0f"),
-                    },
+                    column_config=col_config,
                 )
 
                 top_spread = spreads_df.iloc[0]

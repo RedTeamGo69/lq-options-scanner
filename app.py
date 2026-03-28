@@ -35,8 +35,8 @@ if not TRADIER_API_KEY:
 with st.sidebar:
     st.header("Scanner Settings")
 
-    action = st.radio("Action", ["SELL", "BUY", "SELL SPREAD"], horizontal=True)
-    option_family = st.radio("Type", ["PUTS", "CALLS"], horizontal=True, disabled=(action == "SELL SPREAD"))
+    action = st.radio("Action", ["SELL", "BUY", "SELL SPREAD", "BUY SPREAD"], horizontal=True)
+    option_family = st.radio("Type", ["PUTS", "CALLS"], horizontal=True, disabled=(action in ("SELL SPREAD", "BUY SPREAD")))
 
     st.subheader("Liquidity Filters")
     min_open_interest = st.number_input("Min OI", min_value=0, value=100, step=10)

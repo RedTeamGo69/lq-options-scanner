@@ -209,6 +209,274 @@ def _build_call_spreads(
     return spreads
 
 
+def build_debit_spreads(
+    chain_df: pd.DataFrame,
+    S: float,
+    r: float,
+    q: float,
+    T: float,
+    dte: int,
+    forecast_vol: float,
+    cfg: ScannerConfig,
+) -> pd.DataFrame:
+    """
+    Generate and score vertical debit spreads from the option chain.
+
+    For BUY action (debit spreads):
+      - Bull call spreads: buy lower-strike call, sell higher-strike call
+      - Bear put spreads: buy higher-strike put, sell lower-strike put
+
+    Returns a DataFrame of spreads sorted by a composite score.
+    """
+    if chain_df.empty or T <= 0:
+        return pd.DataFrame()
+
+    df = chain_df.copy()
+    for col in ["strike", "bid", "ask", "mid_iv", "open_interest", "volume"]:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[
+        df["strike"].notna()
+        & df["bid"].notna()
+        & df["ask"].notna()
+        & df["mid_iv"].notna()
+        & (df["mid_iv"] > 0)
+    ].copy()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    puts = df[df["option_type"] == "PUT"].sort_values("strike").reset_index(drop=True)
+    calls = df[df["option_type"] == "CALL"].sort_values("strike").reset_index(drop=True)
+
+    spreads = []
+
+    # Bull call spreads (debit): buy low call, sell high call
+    if len(calls) >= 2:
+        spreads.extend(_build_bull_call_spreads(calls, S, r, q, T, dte, forecast_vol, cfg))
+
+    # Bear put spreads (debit): buy high put, sell low put
+    if len(puts) >= 2:
+        spreads.extend(_build_bear_put_spreads(puts, S, r, q, T, dte, forecast_vol, cfg))
+
+    if not spreads:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(spreads)
+
+    result["Score"] = _score_debit_spreads(result)
+    result = result.sort_values("Score", ascending=False).reset_index(drop=True)
+
+    return result.head(cfg.spread_top_n)
+
+
+def _build_bull_call_spreads(
+    calls: pd.DataFrame,
+    S: float, r: float, q: float, T: float, dte: int,
+    forecast_vol: float, cfg: ScannerConfig,
+) -> List[Dict]:
+    """Generate bull call debit spreads: buy lower call, sell higher call."""
+    spreads = []
+
+    for i in range(len(calls)):
+        long_row = calls.iloc[i]
+        long_K = float(long_row["strike"])
+
+        if not _leg_liquidity_ok(long_row, cfg):
+            continue
+
+        for j in range(i + 1, len(calls)):
+            short_row = calls.iloc[j]
+            short_K = float(short_row["strike"])
+            width = short_K - long_K
+
+            if width <= 0 or width > cfg.spread_max_width:
+                continue
+
+            if not _leg_liquidity_ok(short_row, cfg):
+                continue
+
+            long_ask = safe_float(long_row.get("ask"))
+            short_bid = safe_float(short_row.get("bid"))
+
+            if np.isnan(long_ask) or np.isnan(short_bid):
+                continue
+
+            net_debit = long_ask - short_bid
+            if net_debit <= 0:
+                continue
+
+            max_profit = width - net_debit
+            if max_profit <= 0:
+                continue
+
+            spread = _compute_debit_spread_metrics(
+                strategy="Bull Call",
+                long_row=long_row,
+                short_row=short_row,
+                long_K=long_K,
+                short_K=short_K,
+                width=width,
+                net_debit=net_debit,
+                max_profit=max_profit,
+                S=S, r=r, q=q, T=T, dte=dte,
+                forecast_vol=forecast_vol,
+                option_type="CALL",
+            )
+            spreads.append(spread)
+
+    return spreads
+
+
+def _build_bear_put_spreads(
+    puts: pd.DataFrame,
+    S: float, r: float, q: float, T: float, dte: int,
+    forecast_vol: float, cfg: ScannerConfig,
+) -> List[Dict]:
+    """Generate bear put debit spreads: buy higher put, sell lower put."""
+    spreads = []
+
+    for i in range(len(puts)):
+        long_row = puts.iloc[i]
+        long_K = float(long_row["strike"])
+
+        if not _leg_liquidity_ok(long_row, cfg):
+            continue
+
+        for j in range(i):
+            short_row = puts.iloc[j]
+            short_K = float(short_row["strike"])
+            width = long_K - short_K
+
+            if width <= 0 or width > cfg.spread_max_width:
+                continue
+
+            if not _leg_liquidity_ok(short_row, cfg):
+                continue
+
+            long_ask = safe_float(long_row.get("ask"))
+            short_bid = safe_float(short_row.get("bid"))
+
+            if np.isnan(long_ask) or np.isnan(short_bid):
+                continue
+
+            net_debit = long_ask - short_bid
+            if net_debit <= 0:
+                continue
+
+            max_profit = width - net_debit
+            if max_profit <= 0:
+                continue
+
+            spread = _compute_debit_spread_metrics(
+                strategy="Bear Put",
+                long_row=long_row,
+                short_row=short_row,
+                long_K=long_K,
+                short_K=short_K,
+                width=width,
+                net_debit=net_debit,
+                max_profit=max_profit,
+                S=S, r=r, q=q, T=T, dte=dte,
+                forecast_vol=forecast_vol,
+                option_type="PUT",
+            )
+            spreads.append(spread)
+
+    return spreads
+
+
+def _compute_debit_spread_metrics(
+    strategy: str,
+    long_row: pd.Series,
+    short_row: pd.Series,
+    long_K: float,
+    short_K: float,
+    width: float,
+    net_debit: float,
+    max_profit: float,
+    S: float, r: float, q: float, T: float, dte: int,
+    forecast_vol: float,
+    option_type: str,
+) -> Dict:
+    """Compute all metrics for a single vertical debit spread."""
+    max_loss = net_debit
+
+    # Breakeven
+    if strategy == "Bull Call":
+        breakeven = long_K + net_debit
+    else:  # Bear Put
+        breakeven = long_K - net_debit
+
+    # Risk/reward ratio (profit per dollar risked)
+    risk_reward = max_profit / max_loss if max_loss > 0 else np.nan
+
+    # Net Greeks from BS model using market IV
+    long_iv = safe_float(long_row.get("mid_iv"))
+    short_iv = safe_float(short_row.get("mid_iv"))
+
+    net_delta = net_gamma = net_theta = net_vega = np.nan
+
+    if not np.isnan(long_iv) and not np.isnan(short_iv):
+        long_calc = BlackScholesCalculator(S=S, K=long_K, T=T, r=r, sigma=long_iv, q=q)
+        short_calc = BlackScholesCalculator(S=S, K=short_K, T=T, r=r, sigma=short_iv, q=q)
+        long_greeks = long_calc.greeks(option_type)
+        short_greeks = short_calc.greeks(option_type)
+
+        # Long leg bought, short leg sold
+        net_delta = long_greeks["delta"] - short_greeks["delta"]
+        net_gamma = long_greeks["gamma"] - short_greeks["gamma"]
+        net_theta = long_greeks["theta"] - short_greeks["theta"]
+        net_vega = long_greeks["vega"] - short_greeks["vega"]
+
+    # Probability of profit
+    pop = _probability_of_profit(S, breakeven, T, r, q, forecast_vol, strategy)
+
+    # Model edge: BS model debit vs market debit (negative edge = cheaper than model)
+    model_edge = np.nan
+    if not np.isnan(long_iv) and not np.isnan(short_iv):
+        long_model = BlackScholesCalculator(S=S, K=long_K, T=T, r=r, sigma=forecast_vol, q=q)
+        short_model = BlackScholesCalculator(S=S, K=short_K, T=T, r=r, sigma=forecast_vol, q=q)
+        model_long_price = long_model.price(option_type)
+        model_short_price = short_model.price(option_type)
+        model_debit = model_long_price - model_short_price
+        # Positive edge means we're paying less than model says it's worth
+        model_edge = (model_debit - net_debit) / net_debit * 100.0 if net_debit > 0 else np.nan
+
+    # Annualized return on risk
+    effective_dte = max(dte, 1)
+    ann_return = (max_profit / max_loss) * (365.0 / effective_dte) * 100.0 if max_loss > 0 else np.nan
+
+    # Liquidity: worst leg OI
+    min_oi = min(
+        safe_int(long_row.get("open_interest")),
+        safe_int(short_row.get("open_interest")),
+    )
+
+    return {
+        "Strategy": strategy,
+        "Long Strike": long_K,
+        "Short Strike": short_K,
+        "Width ($)": width,
+        "Net Debit ($)": net_debit,
+        "Max Profit ($)": max_profit,
+        "Max Loss ($)": max_loss,
+        "Breakeven": breakeven,
+        "Risk/Reward": risk_reward,
+        "PoP (%)": pop,
+        "Model Edge (%)": model_edge,
+        "Ann Return (%)": ann_return,
+        "Net Delta": net_delta,
+        "Net Theta": net_theta,
+        "Net Gamma": net_gamma,
+        "Net Vega": net_vega,
+        "Min OI": min_oi,
+        "DTE": dte,
+    }
+
+
 def _compute_spread_metrics(
     strategy: str,
     short_row: pd.Series,
@@ -311,11 +579,11 @@ def _probability_of_profit(
 
     d2 = (np.log(S / breakeven) + (r - q - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
 
-    if strategy == "Bull Put":
+    if strategy in ("Bull Put", "Bull Call"):
         # Profit if spot > breakeven
         return float(norm.cdf(d2) * 100.0)
     else:
-        # Bear call: profit if spot < breakeven
+        # Bear Call / Bear Put: profit if spot < breakeven
         return float(norm.cdf(-d2) * 100.0)
 
 
@@ -323,6 +591,29 @@ def _score_spreads(df: pd.DataFrame) -> pd.Series:
     """
     Composite score for ranking spreads.
     Blend of: PoP, risk/reward, model edge, liquidity.
+    """
+    def _norm(s, higher_is_better=True):
+        s = pd.to_numeric(s, errors="coerce").astype(float)
+        mn, mx = s.min(), s.max()
+        if pd.isna(mn) or pd.isna(mx) or np.isclose(mn, mx):
+            return pd.Series(np.full(len(s), 50.0), index=s.index)
+        scaled = 100.0 * (s - mn) / (mx - mn)
+        if not higher_is_better:
+            scaled = 100.0 - scaled
+        return scaled.clip(0, 100)
+
+    pop_score = _norm(df["PoP (%)"], higher_is_better=True)
+    rr_score = _norm(df["Risk/Reward"], higher_is_better=True)
+    edge_score = _norm(df["Model Edge (%)"], higher_is_better=True)
+    oi_score = _norm(df["Min OI"], higher_is_better=True)
+
+    return (0.35 * pop_score + 0.25 * rr_score + 0.25 * edge_score + 0.15 * oi_score).clip(0, 100)
+
+
+def _score_debit_spreads(df: pd.DataFrame) -> pd.Series:
+    """
+    Composite score for ranking debit spreads.
+    Same blend as credit spreads: PoP, risk/reward, model edge, liquidity.
     """
     def _norm(s, higher_is_better=True):
         s = pd.to_numeric(s, errors="coerce").astype(float)
