@@ -43,7 +43,7 @@ TICKERS = [
     # Blue chips
     "BRK.B", "BRK.A", "V", "MA", "XOM", "CVX", "VZ", "F",
     # Other
-    "NU", "CRWV", "SOLS",
+    "NU", "CRWV", "SOLS", "UNH",
 ]
 
 HEADERS = {
