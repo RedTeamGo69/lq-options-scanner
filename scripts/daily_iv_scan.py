@@ -37,13 +37,13 @@ TICKERS = [
     # Index / ETF
     "SPX", "XSP", "SPY", "QQQ", "IBIT", "SCHD",
     # Financials
-    "JPM", "BAC", "WFC", "GS", "MS", "KEY", "COIN", "HOOD", "AFRM",
+    "JPM", "BAC", "WFC", "GS", "MS", "KEY", "COIN", "HOOD", "AFRM", "SOFI",
     # Healthcare / consumer / industrial
-    "LLY", "NVO", "JNJ", "WMT", "COST", "EBAY", "HIMS",
+    "LLY", "NVO", "JNJ", "WMT", "COST", "EBAY", "HIMS", "UNH",
     # Blue chips
-    "BRK.B", "BRK.A", "V", "MA", "XOM", "CVX", "VZ", "F",
+    "BRK.B", "V", "MA", "XOM", "CVX", "VZ", "F",
     # Other
-    "NU", "CRWV", "SOLS", "UNH",
+    "NU", "CRWV", "SOLS",
 ]
 
 HEADERS = {
