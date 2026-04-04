@@ -41,7 +41,29 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # DISPLAY HELPERS
 # ============================================================
-def style_results(df: pd.DataFrame) -> Styler:
+# Columns shown in the simplified table view (full data is in CSV download)
+_DISPLAY_COLS_SELL = [
+    "Moneyness", "Strike", "Bid", "Ask", "Value Edge (%)",
+    "Spread (%)", "Mkt IV (%)", "Delta", "Theta",
+    "OI", "Vol", "Ann Yield (%)", "Confidence",
+]
+_DISPLAY_COLS_BUY = [
+    "Moneyness", "Strike", "Bid", "Ask", "Value Edge (%)",
+    "Spread (%)", "Mkt IV (%)", "Delta", "Theta",
+    "OI", "Vol", "Confidence",
+]
+
+
+def _get_display_columns(df: pd.DataFrame, action: str) -> list:
+    """Return the subset of columns to display based on action."""
+    template = _DISPLAY_COLS_SELL if action == "SELL" else _DISPLAY_COLS_BUY
+    return [c for c in template if c in df.columns]
+
+
+def style_results(df: pd.DataFrame, action: str = "SELL") -> Styler:
+    display_cols = _get_display_columns(df, action)
+    view = df[display_cols]
+
     def color_edge(val):
         if pd.isna(val):
             return ""
@@ -78,50 +100,28 @@ def style_results(df: pd.DataFrame) -> Styler:
             return "color: #FF8A8A; font-weight: bold"
         return ""
 
-    styler = df.style
+    styler = view.style
     for col, func in {
         "Value Edge (%)": color_edge,
         "Spread (%)": color_spread,
         "Confidence": color_conf,
         "Moneyness": color_moneyness,
     }.items():
-        if col in df.columns:
+        if col in view.columns:
             styler = styler.map(func, subset=[col])
 
-    return styler.format(
-        {
-            "Strike": "{:,.2f}",
-            "Bid": "{:,.2f}",
-            "Ask": "{:,.2f}",
-            "Mid": "{:,.2f}",
-            "Exec Px": "{:,.2f}",
-            "Market Theo": "{:,.2f}",
-            "Forecast Theo": "{:,.2f}",
-            "Abs Edge ($)": "{:,.2f}",
-            "Value Edge (%)": "{:,.1f}",
-            "Spread (%)": "{:,.1f}",
-            "Mkt IV (%)": "{:,.1f}",
-            "Forecast Vol (%)": "{:,.1f}",
-            "RV20 (%)": "{:,.1f}",
-            "RV60 (%)": "{:,.1f}",
-            "RV120 (%)": "{:,.1f}",
-            "IV - Forecast (pts)": "{:,.1f}",
-            "IV - RV20 (pts)": "{:,.1f}",
-            "IV - RV60 (pts)": "{:,.1f}",
-            "IV - RV120 (pts)": "{:,.1f}",
-            "Delta": "{:,.3f}",
-            "Gamma": "{:,.4f}",
-            "Theta": "{:,.4f}",
-            "Vega": "{:,.4f}",
-            "Model Delta": "{:,.3f}",
-            "Model Gamma": "{:,.4f}",
-            "Model Theta": "{:,.4f}",
-            "Model Vega": "{:,.4f}",
-            "Simple Yield (%)": "{:,.2f}",
-            "Ann Yield (%)": "{:,.1f}",
-            "Confidence": "{:,.0f}",
-        }
-    )
+    fmt = {}
+    fmt_map = {
+        "Strike": "{:,.2f}", "Bid": "{:,.2f}", "Ask": "{:,.2f}",
+        "Value Edge (%)": "{:,.1f}", "Spread (%)": "{:,.1f}",
+        "Mkt IV (%)": "{:,.1f}", "Delta": "{:,.3f}", "Theta": "{:,.4f}",
+        "Ann Yield (%)": "{:,.1f}", "Confidence": "{:,.0f}",
+    }
+    for col, f in fmt_map.items():
+        if col in view.columns:
+            fmt[col] = f
+
+    return styler.format(fmt)
 
 
 def display_summary(
@@ -710,7 +710,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 st.warning("No single-leg contracts passed the filters.")
             else:
                 st.subheader(f"Top Contracts | {ticker} | {action} {option_family} | {cached['expiration']}")
-                styled = style_results(best_df)
+                styled = style_results(best_df, action=action)
 
                 st.dataframe(
                     styled,
@@ -720,18 +720,14 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                         "Strike": st.column_config.NumberColumn("Strike", format="$ %.2f"),
                         "Bid": st.column_config.NumberColumn("Bid", format="$ %.2f"),
                         "Ask": st.column_config.NumberColumn("Ask", format="$ %.2f"),
-                        "Mid": st.column_config.NumberColumn("Mid", format="$ %.2f"),
-                        "Exec Px": st.column_config.NumberColumn("Exec Px", format="$ %.2f"),
-                        "Market Theo": st.column_config.NumberColumn("Market Theo", format="$ %.2f"),
-                        "Forecast Theo": st.column_config.NumberColumn("Forecast Theo", format="$ %.2f"),
-                        "Abs Edge ($)": st.column_config.NumberColumn("Abs Edge ($)", format="$ %.2f"),
                         "Value Edge (%)": st.column_config.NumberColumn("Value Edge (%)", format="%.1f%%"),
                         "Spread (%)": st.column_config.NumberColumn("Spread (%)", format="%.1f%%"),
                         "Mkt IV (%)": st.column_config.NumberColumn("Mkt IV (%)", format="%.1f%%"),
-                        "Forecast Vol (%)": st.column_config.NumberColumn("Forecast Vol (%)", format="%.1f%%"),
+                        "Ann Yield (%)": st.column_config.NumberColumn("Ann Yield (%)", format="%.1f%%"),
                         "Confidence": st.column_config.NumberColumn("Confidence", format="%.0f"),
                     },
                 )
+                st.caption("Full data with all Greeks and vol metrics available in CSV download below.")
 
                 csv = best_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
