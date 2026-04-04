@@ -134,7 +134,7 @@ def get_risk_free_rate() -> float:
 
 @st.cache_data(ttl=60)
 def get_quote_and_history(ticker_symbol: str, history_days: int = 420) -> Dict[str, Any]:
-    end_date = datetime.utcnow().date()
+    end_date = datetime.now(NY_TZ).date()
     start_date = end_date - timedelta(days=history_days * 2)
 
     quote_payload = tradier_get("/markets/quotes", params={"symbols": ticker_symbol})

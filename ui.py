@@ -311,7 +311,7 @@ def style_spreads(df: pd.DataFrame) -> Styler:
     return styler.format(fmt)
 
 
-def display_spread_pnl(spread_row: pd.Series, S: float, T: float, r: float, q: float) -> None:
+def display_spread_pnl(spread_row: pd.Series, S: float, T: float, r: float, q: float, forecast_vol: float = 0.30) -> None:
     """Show P&L diagram and scenario table for a selected spread."""
     strategy = spread_row["Strategy"]
     short_K = spread_row["Short Strike"]
@@ -339,16 +339,16 @@ def display_spread_pnl(spread_row: pd.Series, S: float, T: float, r: float, q: f
         buy_K, sell_K = long_K, short_K
 
     from pricing import BlackScholesCalculator
-    sell_calc = BlackScholesCalculator(S=S, K=sell_K, T=T, r=r, sigma=0.30, q=q)
-    buy_calc = BlackScholesCalculator(S=S, K=buy_K, T=T, r=r, sigma=0.30, q=q)
+    sell_calc = BlackScholesCalculator(S=S, K=sell_K, T=T, r=r, sigma=forecast_vol, q=q)
+    buy_calc = BlackScholesCalculator(S=S, K=buy_K, T=T, r=r, sigma=forecast_vol, q=q)
     sell_price = sell_calc.price(opt_type)
     buy_price = buy_calc.price(opt_type)
 
     legs = [
         {"strike": sell_K, "option_type": opt_type, "action": "SELL",
-         "premium": sell_price, "iv": 0.30, "quantity": 1},
+         "premium": sell_price, "iv": forecast_vol, "quantity": 1},
         {"strike": buy_K, "option_type": opt_type, "action": "BUY",
-         "premium": buy_price, "iv": 0.30, "quantity": 1},
+         "premium": buy_price, "iv": forecast_vol, "quantity": 1},
     ]
 
     payoff_df = compute_payoff_curve(legs, S, T, r, q)
@@ -753,7 +753,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         q_cached = cached["q"]
 
         if is_spread_mode and not spreads_df.empty:
-            display_spread_pnl(spreads_df.iloc[0], S_cached, T_cached, r_cached, q_cached)
+            display_spread_pnl(spreads_df.iloc[0], S_cached, T_cached, r_cached, q_cached, forecast_vol=cached["forecast_vol"])
 
         elif not best_df.empty:
             top = best_df.iloc[0]
@@ -786,7 +786,8 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 if opt_type == "PUT":
                     max_loss_single = strike - exec_px
                 else:
-                    max_loss_single = 10.0 * exec_px
+                    # Naked short call: use spot as collateral basis (like broker margin)
+                    max_loss_single = S_cached - exec_px
             else:
                 max_loss_single = exec_px
 
