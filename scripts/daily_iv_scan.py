@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import psycopg2
+import pytz
 import requests
 
 logging.basicConfig(
@@ -187,59 +188,61 @@ def save_row(conn, snapshot_date: str, ticker: str, expiration: str,
 
 # ── Main ─────────────────────────────────────────────────────
 def main():
-    today = datetime.utcnow().date()
+    today = datetime.now(pytz.timezone("America/New_York")).date()
     snapshot_date = today.isoformat()
 
     conn = psycopg2.connect(DATABASE_URL)
-    ensure_table(conn)
+    try:
+        ensure_table(conn)
 
-    total_rows = 0
-    errors = 0
+        total_rows = 0
+        errors = 0
 
-    for ticker in TICKERS:
-        try:
-            spot = get_spot(ticker)
-            expirations = get_expirations(ticker)
-            if not expirations:
-                logger.warning(f"{ticker}: no expirations found, skipping")
-                continue
-
-            ticker_rows = 0
-            for exp in expirations:
-                try:
-                    exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
-                    dte = (exp_date - today).days
-                    if dte < 0:
-                        continue
-
-                    chain = get_chain(ticker, exp)
-                    if not chain:
-                        continue
-
-                    ivs = compute_atm_iv(chain, spot)
-                    if ivs["atm_avg_iv"] is None:
-                        continue
-
-                    save_row(conn, snapshot_date, ticker, exp, dte, spot, ivs)
-                    ticker_rows += 1
-
-                except Exception:
-                    logger.debug(f"{ticker} {exp}: chain error", exc_info=True)
+        for ticker in TICKERS:
+            try:
+                spot = get_spot(ticker)
+                expirations = get_expirations(ticker)
+                if not expirations:
+                    logger.warning(f"{ticker}: no expirations found, skipping")
                     continue
 
-            conn.commit()
-            total_rows += ticker_rows
-            logger.info(f"{ticker}: spot=${spot:.2f}, saved {ticker_rows} expirations")
+                ticker_rows = 0
+                for exp in expirations:
+                    try:
+                        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+                        dte = (exp_date - today).days
+                        if dte < 0:
+                            continue
 
-            # Small delay to be kind to Tradier rate limits
-            time.sleep(0.3)
+                        chain = get_chain(ticker, exp)
+                        if not chain:
+                            continue
 
-        except Exception as e:
-            errors += 1
-            logger.error(f"{ticker}: FAILED — {e}")
-            continue
+                        ivs = compute_atm_iv(chain, spot)
+                        if ivs["atm_avg_iv"] is None:
+                            continue
 
-    conn.close()
+                        save_row(conn, snapshot_date, ticker, exp, dte, spot, ivs)
+                        ticker_rows += 1
+
+                    except Exception:
+                        logger.debug(f"{ticker} {exp}: chain error", exc_info=True)
+                        continue
+
+                conn.commit()
+                total_rows += ticker_rows
+                logger.info(f"{ticker}: spot=${spot:.2f}, saved {ticker_rows} expirations")
+
+                # Small delay to be kind to Tradier rate limits
+                time.sleep(0.3)
+
+            except Exception as e:
+                errors += 1
+                logger.error(f"{ticker}: FAILED — {e}")
+                continue
+    finally:
+        conn.close()
+
     logger.info(f"Done. {total_rows} rows saved, {errors} ticker errors.")
 
     if errors > len(TICKERS) // 2:

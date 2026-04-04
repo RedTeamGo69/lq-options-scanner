@@ -18,7 +18,7 @@ NY_TZ = pytz.timezone("America/New_York")
 TRADING_DAYS_PER_YEAR = 252.0
 CALENDAR_DAYS_PER_YEAR = 365.0
 T_FLOOR_YEARS = 1.0 / (365.0 * 24.0 * 60.0 * 60.0)  # 1 second
-TICKER_PATTERN = re.compile(r'^[A-Z]{1,5}$')
+TICKER_PATTERN = re.compile(r'^[A-Z]{1,5}(\.[A-Z])?$')
 
 
 # ============================================================

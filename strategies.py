@@ -610,24 +610,4 @@ def _score_spreads(df: pd.DataFrame) -> pd.Series:
     return (0.35 * pop_score + 0.25 * rr_score + 0.25 * edge_score + 0.15 * oi_score).clip(0, 100)
 
 
-def _score_debit_spreads(df: pd.DataFrame) -> pd.Series:
-    """
-    Composite score for ranking debit spreads.
-    Same blend as credit spreads: PoP, risk/reward, model edge, liquidity.
-    """
-    def _norm(s, higher_is_better=True):
-        s = pd.to_numeric(s, errors="coerce").astype(float)
-        mn, mx = s.min(), s.max()
-        if pd.isna(mn) or pd.isna(mx) or np.isclose(mn, mx):
-            return pd.Series(np.full(len(s), 50.0), index=s.index)
-        scaled = 100.0 * (s - mn) / (mx - mn)
-        if not higher_is_better:
-            scaled = 100.0 - scaled
-        return scaled.clip(0, 100)
-
-    pop_score = _norm(df["PoP (%)"], higher_is_better=True)
-    rr_score = _norm(df["Risk/Reward"], higher_is_better=True)
-    edge_score = _norm(df["Model Edge (%)"], higher_is_better=True)
-    oi_score = _norm(df["Min OI"], higher_is_better=True)
-
-    return (0.35 * pop_score + 0.25 * rr_score + 0.25 * edge_score + 0.15 * oi_score).clip(0, 100)
+_score_debit_spreads = _score_spreads  # Same scoring logic for both credit and debit spreads
