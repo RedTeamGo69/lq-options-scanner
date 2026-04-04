@@ -227,16 +227,17 @@ def display_expected_moves(S: float, T: float, forecast_vol: float, best_df: pd.
     )
 
 
-def display_interpretation(best_df: pd.DataFrame, action: str) -> None:
+def display_interpretation(best_df: pd.DataFrame, action: str, forecast_vol: float) -> None:
     if best_df.empty:
         return
 
     top = best_df.iloc[0]
+    iv_minus_fv = top["Mkt IV (%)"] - forecast_vol * 100.0
     msg = (
         f"Top contract confidence {top['Confidence']:.0f}/100. "
         f"Value edge {top['Value Edge (%)']:.1f}%. "
         f"Spread {top['Spread (%)']:.1f}%. "
-        f"Market IV minus forecast vol {top['IV - Forecast (pts)']:.1f} vol points."
+        f"Market IV minus forecast vol {iv_minus_fv:.1f} vol points."
     )
 
     if action == "BUY":
@@ -528,9 +529,6 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                     action=action,
                     option_family=option_family,
                     forecast_vol=effective_forecast_vol if effective_forecast_vol is not None else forecast_vol,
-                    rv20=rv20,
-                    rv60=rv60,
-                    rv120=rv120,
                     cfg=cfg,
                 )
 
@@ -645,7 +643,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
 
     if not best_df.empty and not is_spread_mode:
         display_expected_moves(cached["S"], cached["T"], cached["forecast_vol"], best_df)
-        display_interpretation(best_df, action)
+        display_interpretation(best_df, action, forecast_vol=cached["forecast_vol"])
 
     if is_spread_mode:
         tab_names = ["Vertical Spreads", "P&L Analysis", "Term Structure", "Put Skew", "Call Skew", "Local IV History"]

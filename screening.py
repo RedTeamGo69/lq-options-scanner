@@ -149,9 +149,6 @@ def screen_chain(
     action: str,
     option_family: str,
     forecast_vol: float,
-    rv20: Optional[float],
-    rv60: Optional[float],
-    rv120: Optional[float],
     cfg: ScannerConfig,
 ) -> pd.DataFrame:
     if chain_df.empty:
@@ -215,14 +212,10 @@ def screen_chain(
         K = float(row.strike)
         bid = float(row.bid)
         ask = float(row.ask)
-        mid = float(row.mid)
         exec_px = float(row.exec_px)
         market_iv = float(row.mid_iv)
         oi = safe_int(getattr(row, "open_interest", None))
         vol = safe_int(getattr(row, "volume", None))
-
-        market_calc = BlackScholesCalculator(S=S, K=K, T=T, r=r, sigma=market_iv, q=q)
-        market_theo = market_calc.price(option_type)
 
         row_series = pd.Series({
             "delta_mkt": getattr(row, "delta_mkt", np.nan),
@@ -246,7 +239,6 @@ def screen_chain(
 
         forecast_calc = BlackScholesCalculator(S=S, K=K, T=T, r=r, sigma=forecast_vol, q=q)
         forecast_theo = forecast_calc.price(option_type)
-        forecast_greeks = forecast_calc.greeks(option_type)
 
         if action == "BUY":
             abs_edge = forecast_theo - exec_px
@@ -254,11 +246,6 @@ def screen_chain(
             abs_edge = exec_px - forecast_theo
 
         value_edge_pct = (abs_edge / exec_px) * 100.0 if exec_px > 0 else np.nan
-
-        iv_minus_forecast = (market_iv - forecast_vol) * 100.0
-        iv_minus_rv20 = ((market_iv - rv20) * 100.0) if rv20 is not None else np.nan
-        iv_minus_rv60 = ((market_iv - rv60) * 100.0) if rv60 is not None else np.nan
-        iv_minus_rv120 = ((market_iv - rv120) * 100.0) if rv120 is not None else np.nan
 
         yld = short_option_yield_metrics(action, option_type, S, K, exec_px, dte)
 
@@ -268,34 +255,14 @@ def screen_chain(
                 "Strike": K,
                 "Bid": bid,
                 "Ask": ask,
-                "Mid": mid,
                 "Exec Px": exec_px,
-                "Market Theo": market_theo,
-                "Forecast Theo": forecast_theo,
-                "Abs Edge ($)": abs_edge,
                 "Value Edge (%)": value_edge_pct,
                 "Spread (%)": float(row.spread_pct),
                 "Mkt IV (%)": market_iv * 100.0,
-                "Forecast Vol (%)": forecast_vol * 100.0,
-                "RV20 (%)": rv20 * 100.0 if rv20 is not None else np.nan,
-                "RV60 (%)": rv60 * 100.0 if rv60 is not None else np.nan,
-                "RV120 (%)": rv120 * 100.0 if rv120 is not None else np.nan,
-                "IV - Forecast (pts)": iv_minus_forecast,
-                "IV - RV20 (pts)": iv_minus_rv20,
-                "IV - RV60 (pts)": iv_minus_rv60,
-                "IV - RV120 (pts)": iv_minus_rv120,
                 "Delta": market_greeks["delta"],
-                "Gamma": market_greeks["gamma"],
                 "Theta": market_greeks["theta"],
-                "Vega": market_greeks["vega"],
-                "Model Delta": forecast_greeks["delta"],
-                "Model Gamma": forecast_greeks["gamma"],
-                "Model Theta": forecast_greeks["theta"],
-                "Model Vega": forecast_greeks["vega"],
                 "Vol": vol,
                 "OI": oi,
-                "DTE": dte,
-                "Simple Yield (%)": yld["Simple Yield (%)"],
                 "Ann Yield (%)": yld["Ann Yield (%)"],
             }
         )
