@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests psycopg2-binary numpy
+        run: pip install requests psycopg2-binary numpy pytz
 
       - name: Run daily IV scan
         env:
