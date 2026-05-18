@@ -7,8 +7,19 @@ import pytz
 # ============================================================
 # ENV / CONSTANTS
 # ============================================================
-TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1").rstrip("/")
-TRADIER_API_KEY = os.getenv("TRADIER_API_KEY", "")
+PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "https://api.public.com").rstrip("/")
+PUBLIC_API_SECRET = os.getenv("PUBLIC_API_SECRET", "")
+PUBLIC_ACCOUNT_ID = os.getenv("PUBLIC_ACCOUNT_ID", "")
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+PUBLIC_TOKEN_VALIDITY_MINUTES = _int_env("PUBLIC_TOKEN_VALIDITY_MINUTES", 30)
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred").rstrip("/")
 
