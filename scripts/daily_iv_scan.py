@@ -34,11 +34,11 @@ TRADIER_BASE = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1").rstri
 TICKERS = [
     # Mega-cap / tech
     "NVDA", "AAPL", "GOOG", "GOOGL", "MSFT", "AMZN", "TSM", "AVGO",
-    "TSLA", "META", "NFLX", "ORCL", "PLTR", "ARM", "INTC", "MU",
+    "TSLA", "META", "NFLX", "ORCL", "PLTR", "ARM", "INTC", "MU", "AMD",
     # Index / ETF
-    "SPX", "XSP", "SPY", "QQQ", "IBIT", "SCHD",
+    "SPX", "XSP", "NDX", "SPY", "QQQ", "IBIT", "SCHD",
     # Financials
-    "JPM", "BAC", "WFC", "GS", "MS", "KEY", "COIN", "HOOD", "AFRM", "SOFI",
+    "JPM", "BAC", "WFC", "GS", "MS", "KEY", "COIN", "HOOD", "AFRM", "SOFI", "OWL",
     # Healthcare / consumer / industrial
     "LLY", "NVO", "JNJ", "WMT", "COST", "EBAY", "HIMS", "UNH",
     # Blue chips
