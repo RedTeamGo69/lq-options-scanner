@@ -23,6 +23,6 @@ jobs:
 
       - name: Run daily IV scan
         env:
-          PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
+          TRADIER_API_KEY: ${{ secrets.TRADIER_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/daily_iv_scan.py

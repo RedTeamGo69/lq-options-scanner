@@ -1,6 +1,6 @@
 import streamlit as st
 
-from config import ScannerConfig, PUBLIC_API_SECRET, TICKER_PATTERN
+from config import ScannerConfig, TRADIER_API_KEY, TICKER_PATTERN
 from utils import dedupe_preserve_order
 from database import init_db
 from ui import process_ticker
@@ -21,13 +21,12 @@ _ = init_db()
 
 st.title("📈 LQ Quant Options Value Screener v3")
 st.markdown(
-    "Public powers live chain pricing and Greeks. Yahoo enriches company name, dividend yield, "
-    "earnings and ex-dividend dates. "
+    "Tradier powers live chain pricing and Greeks. Yahoo enriches earnings and ex-dividend dates. "
     "SQLite stores daily ATM IV snapshots so the app can build its own real IV history over time."
 )
 
-if not PUBLIC_API_SECRET:
-    st.error("Missing Public API secret. Set PUBLIC_API_SECRET before using the app.")
+if not TRADIER_API_KEY:
+    st.error("Missing Tradier API key. Set TRADIER_API_KEY before using the app.")
     st.stop()
 
 # ============================================================
