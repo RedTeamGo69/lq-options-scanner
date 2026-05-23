@@ -1,26 +1,24 @@
 """
 Daily IV Scanner — runs via GitHub Actions to collect ATM IV snapshots.
 
-Fetches option chains from Public for a list of tickers, computes the
+Fetches option chains from Tradier for a list of tickers, computes the
 ATM implied vol for each expiration, and saves to PostgreSQL (Neon).
 
 Required env vars:
-    PUBLIC_API_SECRET  — Public API secret (Settings -> Security -> API)
-    DATABASE_URL       — PostgreSQL connection string (Neon)
+    TRADIER_API_KEY  — Tradier API bearer token
+    DATABASE_URL     — PostgreSQL connection string (Neon)
 """
 
 import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import psycopg2
 import pytz
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import public_api  # noqa: E402  (repo root added to sys.path above)
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,11 +27,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ───────────────────────────────────────────────────
-# PUBLIC_API_SECRET is read by public_api via config; surface a clear error
-# here if it is missing rather than failing on the first request.
-if not os.getenv("PUBLIC_API_SECRET"):
-    raise SystemExit("PUBLIC_API_SECRET environment variable is required.")
+TRADIER_API_KEY = os.environ["TRADIER_API_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
+TRADIER_BASE = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1").rstrip("/")
 
 TICKERS = [
     # Mega-cap / tech
@@ -51,17 +47,60 @@ TICKERS = [
     "NU", "CRWV", "SOLS",
 ]
 
-# ── Public helpers ───────────────────────────────────────────
+HEADERS = {
+    "Authorization": f"Bearer {TRADIER_API_KEY}",
+    "Accept": "application/json",
+}
+
+session = requests.Session()
+adapter = requests.adapters.HTTPAdapter(pool_connections=5, pool_maxsize=10, max_retries=2)
+session.mount("https://", adapter)
+
+
+# ── Tradier helpers ──────────────────────────────────────────
+def tradier_get(path: str, params: dict | None = None) -> dict:
+    resp = session.get(f"{TRADIER_BASE}{path}", headers=HEADERS, params=params, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def get_spot(ticker: str) -> float:
-    return public_api.get_spot(ticker)
+    data = tradier_get("/markets/quotes", params={"symbols": ticker})
+    quote = data.get("quotes", {}).get("quote")
+    if isinstance(quote, list):
+        quote = quote[0] if quote else None
+    if not isinstance(quote, dict):
+        raise ValueError(f"No quote for {ticker}")
+    price = quote.get("last") or quote.get("close")
+    if price is None or float(price) <= 0:
+        raise ValueError(f"Invalid price for {ticker}")
+    return float(price)
 
 
 def get_expirations(ticker: str) -> list[str]:
-    return public_api.get_option_expirations(ticker)
+    data = tradier_get(
+        "/markets/options/expirations",
+        params={"symbol": ticker, "includeAllRoots": "true", "strikes": "false"},
+    )
+    exp = data.get("expirations", {}).get("date")
+    if isinstance(exp, str):
+        return [exp]
+    if isinstance(exp, list):
+        return exp
+    return []
 
 
 def get_chain(ticker: str, expiration: str) -> list[dict]:
-    return public_api.get_option_chain_rows(ticker, expiration)
+    data = tradier_get(
+        "/markets/options/chains",
+        params={"symbol": ticker, "expiration": expiration, "greeks": "true"},
+    )
+    options = data.get("options", {}).get("option")
+    if isinstance(options, list):
+        return options
+    if isinstance(options, dict):
+        return [options]
+    return []
 
 
 # ── ATM IV extraction ────────────────────────────────────────
@@ -70,14 +109,14 @@ def compute_atm_iv(chain: list[dict], spot: float) -> dict:
     calls, puts = [], []
     for row in chain:
         strike = row.get("strike")
-        mid_iv = row.get("mid_iv")
+        mid_iv = row.get("greeks", {}).get("mid_iv") if isinstance(row.get("greeks"), dict) else None
         if strike is None or mid_iv is None:
             continue
         strike = float(strike)
         iv = float(mid_iv)
         if iv <= 0:
             continue
-        otype = (row.get("option_type") or "").upper()
+        otype = row.get("option_type", "").upper()
         if otype == "CALL":
             calls.append((strike, iv))
         elif otype == "PUT":
@@ -194,7 +233,7 @@ def main():
                 total_rows += ticker_rows
                 logger.info(f"{ticker}: spot=${spot:.2f}, saved {ticker_rows} expirations")
 
-                # Small delay to be kind to Public API rate limits
+                # Small delay to be kind to Tradier rate limits
                 time.sleep(0.3)
 
             except Exception as e:

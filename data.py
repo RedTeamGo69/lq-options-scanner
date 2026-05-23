@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -8,8 +8,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-import public_api
-from config import FRED_API_KEY, FRED_BASE_URL, NY_TZ
+from config import TRADIER_BASE_URL, TRADIER_API_KEY, FRED_API_KEY, FRED_BASE_URL, NY_TZ
 from utils import safe_float
 
 logger = logging.getLogger(__name__)
@@ -25,6 +24,20 @@ def get_http_session() -> requests.Session:
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
+
+
+def tradier_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not TRADIER_API_KEY:
+        raise ValueError("Missing Tradier API key. Set TRADIER_API_KEY environment variable.")
+
+    session = get_http_session()
+    headers = {
+        "Authorization": f"Bearer {TRADIER_API_KEY}",
+        "Accept": "application/json",
+    }
+    response = session.get(f"{TRADIER_BASE_URL}{path}", headers=headers, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
 
 
 def fred_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -47,39 +60,49 @@ def fred_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
 
 # ============================================================
-# YFINANCE-DERIVED FIELDS
+# PARSERS
 # ============================================================
-# Public's API exposes neither a company name nor a dividend yield, so these
-# two fields come from yfinance (already used below for earnings / ex-div dates).
+def parse_history_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    history_obj = payload.get("history") if isinstance(payload, dict) else None
+    day_rows = history_obj.get("day") if isinstance(history_obj, dict) else None
+    if day_rows is None:
+        return []
+    if isinstance(day_rows, dict):
+        return [day_rows]
+    if isinstance(day_rows, list):
+        return day_rows
+    return []
+
+
+def parse_option_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    options_obj = payload.get("options") if isinstance(payload, dict) else None
+    option_rows = options_obj.get("option") if isinstance(options_obj, dict) else None
+    if option_rows is None:
+        return []
+    if isinstance(option_rows, dict):
+        return [option_rows]
+    if isinstance(option_rows, list):
+        return option_rows
+    return []
+
+
+# ============================================================
+# DATA FETCHERS - TRADIER
+# ============================================================
 @st.cache_data(ttl=86400)
 def get_company_name(ticker_symbol: str) -> str:
     try:
-        info = getattr(yf.Ticker(ticker_symbol), "info", None) or {}
-        for key in ("longName", "shortName"):
-            name = info.get(key)
-            if name:
-                return str(name)
+        data = tradier_get("/markets/quotes", params={"symbols": ticker_symbol})
+        quote = data.get("quotes", {}).get("quote")
+        if isinstance(quote, list):
+            quote = quote[0] if quote else {}
+        if isinstance(quote, dict):
+            desc = quote.get("description")
+            if desc:
+                return desc
     except Exception:
         logger.debug("Failed to fetch company name for %s", ticker_symbol, exc_info=True)
     return ticker_symbol
-
-
-@st.cache_data(ttl=86400)
-def get_dividend_yield(ticker_symbol: str, spot: float) -> float:
-    """Trailing-12-month cash dividends / spot, from yfinance."""
-    if spot is None or spot <= 0:
-        return 0.0
-    try:
-        divs = yf.Ticker(ticker_symbol).dividends
-        if divs is not None and not divs.empty:
-            idx = divs.index
-            now = pd.Timestamp.now(tz=idx.tz) if getattr(idx, "tz", None) is not None else pd.Timestamp.now()
-            ttm = float(divs[idx >= (now - pd.Timedelta(days=365))].sum())
-            if ttm > 0:
-                return max(min(ttm / float(spot), 1.0), 0.0)
-    except Exception:
-        logger.debug("Failed to fetch dividend yield for %s", ticker_symbol, exc_info=True)
-    return 0.0
 
 
 @st.cache_data(ttl=3600)
@@ -109,41 +132,47 @@ def get_risk_free_rate() -> float:
     return fallback_rate
 
 
-def _bars_to_history(bars: List[Dict[str, Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(bars)
-    if df.empty or "close" not in df.columns or "timestamp" not in df.columns:
-        return pd.DataFrame()
-
-    dt = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
-    if dt.isna().all():
-        epoch = pd.to_numeric(df["timestamp"], errors="coerce")
-        dt = pd.to_datetime(epoch, unit="ms", errors="coerce", utc=True)
-        if dt.isna().all():
-            dt = pd.to_datetime(epoch, unit="s", errors="coerce", utc=True)
-
-    df["date"] = dt.dt.tz_convert(None)
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
-    return df[["date", "close"]]
-
-
 @st.cache_data(ttl=60)
 def get_quote_and_history(ticker_symbol: str, history_days: int = 420) -> Dict[str, Any]:
-    quote = public_api.get_equity_quote(ticker_symbol)
+    end_date = datetime.now(NY_TZ).date()
+    start_date = end_date - timedelta(days=history_days * 2)
+
+    quote_payload = tradier_get("/markets/quotes", params={"symbols": ticker_symbol})
+    quote = quote_payload.get("quotes", {}).get("quote")
+    if isinstance(quote, list):
+        quote = quote[0] if quote else None
     if not isinstance(quote, dict):
         raise ValueError(f"No quote returned for {ticker_symbol}")
 
     current_price = safe_float(quote.get("last"))
     if np.isnan(current_price):
-        current_price = safe_float(quote.get("previousClose"))
+        current_price = safe_float(quote.get("close"))
     if np.isnan(current_price) or current_price <= 0:
         raise ValueError(f"Invalid current price for {ticker_symbol}")
 
-    div_yield = get_dividend_yield(ticker_symbol, float(current_price))
+    div_yield = safe_float(quote.get("div_yield"), 0.0)
+    if div_yield > 1.0:
+        div_yield /= 100.0
+    div_yield = max(div_yield, 0.0)
 
-    hist = _bars_to_history(public_api.get_daily_bars(ticker_symbol))
-    if hist.empty:
+    history_payload = tradier_get(
+        "/markets/history",
+        params={
+            "symbol": ticker_symbol,
+            "interval": "daily",
+            "start": start_date.strftime("%Y-%m-%d"),
+            "end": end_date.strftime("%Y-%m-%d"),
+        },
+    )
+    rows = parse_history_rows(history_payload)
+    if not rows:
         raise ValueError(f"No history returned for {ticker_symbol}")
+
+    hist = pd.DataFrame(rows)
+    hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
+    hist["close"] = pd.to_numeric(hist["close"], errors="coerce")
+    hist = hist.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+
     if len(hist) < 130:
         raise ValueError(f"Not enough history for {ticker_symbol}")
 
@@ -159,12 +188,33 @@ def get_quote_and_history(ticker_symbol: str, history_days: int = 420) -> Dict[s
 
 @st.cache_data(ttl=600)
 def get_expiration_dates(ticker_symbol: str) -> List[str]:
-    return public_api.get_option_expirations(ticker_symbol)
+    payload = tradier_get(
+        "/markets/options/expirations",
+        params={
+            "symbol": ticker_symbol,
+            "includeAllRoots": "true",
+            "strikes": "false",
+        },
+    )
+    expiration = payload.get("expirations", {}).get("date")
+    if isinstance(expiration, str):
+        return [expiration]
+    if isinstance(expiration, list):
+        return expiration
+    return []
 
 
 @st.cache_data(ttl=30)
 def get_option_chain(ticker_symbol: str, expiration: str) -> pd.DataFrame:
-    rows = public_api.get_option_chain_rows(ticker_symbol, expiration)
+    payload = tradier_get(
+        "/markets/options/chains",
+        params={
+            "symbol": ticker_symbol,
+            "expiration": expiration,
+            "greeks": "true",
+        },
+    )
+    rows = parse_option_rows(payload)
     if not rows:
         return pd.DataFrame()
 
@@ -172,22 +222,32 @@ def get_option_chain(ticker_symbol: str, expiration: str) -> pd.DataFrame:
     if df.empty:
         return df
 
-    for col in ["strike", "bid", "ask", "last", "volume", "open_interest",
-                "mid_iv", "delta", "gamma", "theta", "vega"]:
+    for col in ["strike", "bid", "ask", "last", "volume", "open_interest"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        else:
-            df[col] = np.nan
 
     if "option_type" in df.columns:
         df["option_type"] = df["option_type"].astype(str).str.upper()
     else:
         df["option_type"] = ""
 
-    df["delta_mkt"] = df["delta"]
-    df["gamma_mkt"] = df["gamma"]
-    df["theta_mkt"] = df["theta"]
-    df["vega_mkt"] = df["vega"]
+    def extract_greek(obj, key):
+        if isinstance(obj, dict):
+            return safe_float(obj.get(key))
+        return np.nan
+
+    if "greeks" in df.columns:
+        df["mid_iv"] = df["greeks"].apply(lambda x: extract_greek(x, "mid_iv"))
+        df["delta_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "delta"))
+        df["gamma_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "gamma"))
+        df["theta_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "theta"))
+        df["vega_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "vega"))
+    else:
+        df["mid_iv"] = np.nan
+        df["delta_mkt"] = np.nan
+        df["gamma_mkt"] = np.nan
+        df["theta_mkt"] = np.nan
+        df["vega_mkt"] = np.nan
 
     return df
 

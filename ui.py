@@ -421,7 +421,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         except requests.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status == 429:
-                st.warning(f"{ticker}: Public API rate limit hit.")
+                st.warning(f"{ticker}: Tradier rate limit hit.")
             else:
                 st.error(f"{ticker}: HTTP error ({status}).")
             return
@@ -582,7 +582,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             except requests.HTTPError as e:
                 status = getattr(e.response, "status_code", None)
                 if status == 429:
-                    st.warning("Public API rate limit hit while scanning.")
+                    st.warning("Tradier rate limit hit while scanning.")
                 else:
                     st.error(f"HTTP error while scanning ({status}).")
                 return
