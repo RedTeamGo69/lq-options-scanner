@@ -6,9 +6,15 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-import yfinance as yf
 
-from config import TRADIER_BASE_URL, TRADIER_API_KEY, FRED_API_KEY, FRED_BASE_URL, NY_TZ
+from config import (
+    TRADIER_BASE_URL,
+    TRADIER_FUNDAMENTALS_BASE_URL,
+    TRADIER_API_KEY,
+    FRED_API_KEY,
+    FRED_BASE_URL,
+    NY_TZ,
+)
 from utils import safe_float
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,27 @@ def tradier_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str,
         "Accept": "application/json",
     }
     response = session.get(f"{TRADIER_BASE_URL}{path}", headers=headers, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def tradier_fundamentals_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """GET against Tradier's beta fundamentals API (Morningstar-sourced).
+
+    Same auth/session as tradier_get, but a separate base URL since fundamentals
+    live under /beta rather than /v1. Returns the parsed JSON (typically a list).
+    """
+    if not TRADIER_API_KEY:
+        raise ValueError("Missing Tradier API key. Set TRADIER_API_KEY environment variable.")
+
+    session = get_http_session()
+    headers = {
+        "Authorization": f"Bearer {TRADIER_API_KEY}",
+        "Accept": "application/json",
+    }
+    response = session.get(
+        f"{TRADIER_FUNDAMENTALS_BASE_URL}{path}", headers=headers, params=params, timeout=10
+    )
     response.raise_for_status()
     return response.json()
 
@@ -253,120 +280,131 @@ def get_option_chain(ticker_symbol: str, expiration: str) -> pd.DataFrame:
 
 
 # ============================================================
-# YAHOO ENRICHMENT
+# TRADIER FUNDAMENTALS (dividends + corporate calendar)
 # ============================================================
+def _iso_date(value: Any) -> Optional[str]:
+    """Coerce a date-like value to an ISO yyyy-mm-dd string, or None."""
+    if value is None or value == "":
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    try:
+        return pd.Timestamp(parsed).date().isoformat()
+    except (AttributeError, ValueError):
+        return None
+
+
+def _collect_fundamentals_rows(payload: Any, table_key: str) -> List[Dict[str, Any]]:
+    """Recursively gather every dict row stored under ``table_key`` anywhere in
+    the deeply-nested, Morningstar-shaped fundamentals payload. Resilient to the
+    exact nesting depth and to Tradier's list/dict/null collection quirks."""
+    rows: List[Dict[str, Any]] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == table_key and isinstance(value, list):
+                    rows.extend(item for item in value if isinstance(item, dict))
+                else:
+                    walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(payload)
+    return rows
+
+
+def _row_value(row: Dict[str, Any], *keys: str) -> Any:
+    """First non-null value among the given keys (tolerates field-name variants)."""
+    for key in keys:
+        if key in row and row[key] is not None:
+            return row[key]
+    return None
+
+
+def _pick_event_date(dated_rows: List[tuple], today) -> Optional[str]:
+    """From (date, iso) tuples, return the soonest date >= today, else the latest."""
+    valid = [(d, iso) for d, iso in dated_rows if d is not None]
+    if not valid:
+        return None
+    future = sorted((t for t in valid if t[0] >= today), key=lambda t: t[0])
+    if future:
+        return future[0][1]
+    return max(valid, key=lambda t: t[0])[1]
+
+
 @st.cache_data(ttl=3600)
-def get_yahoo_events(ticker_symbol: str) -> Dict[str, Any]:
+def get_tradier_fundamentals(ticker_symbol: str) -> Dict[str, Any]:
+    """Next earnings date, ex-dividend date, and trailing-twelve-month dividend
+    total from Tradier's beta fundamentals API (Morningstar-sourced).
+
+    Returns the same keys the rest of the app consumes. Every field degrades to
+    None on any error or missing coverage, so the UI never breaks on this call.
+    """
     result: Dict[str, Any] = {
         "next_earnings_date": None,
         "ex_dividend_date": None,
         "trailing_annual_dividend": None,
     }
 
+    today = datetime.now(NY_TZ).date()
+
+    # --- Dividends: ex-dividend date + trailing-12-month total ---
     try:
-        tkr = yf.Ticker(ticker_symbol)
+        payload = tradier_fundamentals_get(
+            "/markets/fundamentals/dividends", params={"symbols": ticker_symbol}
+        )
+        div_rows = _collect_fundamentals_rows(payload, "cash_dividends")
 
-        earnings_dt = None
-        try:
-            edf = tkr.get_earnings_dates(limit=8)
-            if edf is not None and not edf.empty:
-                edf = edf.reset_index()
-                first_col = edf.columns[0]
-                edf[first_col] = pd.to_datetime(edf[first_col], errors="coerce")
-                edf = edf.dropna(subset=[first_col]).sort_values(first_col)
-                today = pd.Timestamp(datetime.now(NY_TZ).date())
-                future_rows = edf[edf[first_col].dt.date >= today.date()]
-                if not future_rows.empty:
-                    earnings_dt = future_rows.iloc[0][first_col]
-                else:
-                    earnings_dt = edf.iloc[-1][first_col]
-        except Exception:
-            logger.debug("yfinance earnings date fetch failed for %s", ticker_symbol, exc_info=True)
+        # Dedupe by ex-date (the same dividend can appear under multiple result
+        # blocks, e.g. Company vs Stock share-class entries).
+        by_ex_date: Dict[str, Dict[str, Any]] = {}
+        for row in div_rows:
+            iso = _iso_date(_row_value(row, "ex_date", "ex_dividend_date"))
+            if iso is not None and iso not in by_ex_date:
+                by_ex_date[iso] = row
 
-        if earnings_dt is None:
-            try:
-                cal = tkr.calendar
-                cal_earnings = None
-                if isinstance(cal, dict):
-                    cal_earnings = cal.get("Earnings Date")
-                    if isinstance(cal_earnings, (list, tuple)):
-                        cal_earnings = cal_earnings[0] if cal_earnings else None
-                elif isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
-                    cal_earnings = cal.loc["Earnings Date"].iloc[0]
-                if cal_earnings is not None:
-                    parsed = pd.to_datetime(cal_earnings, errors="coerce")
-                    if pd.notna(parsed):
-                        earnings_dt = parsed
-            except Exception:
-                logger.debug("yfinance calendar fallback failed for %s", ticker_symbol, exc_info=True)
+        if by_ex_date:
+            dated = [(datetime.strptime(iso, "%Y-%m-%d").date(), iso) for iso in by_ex_date]
+            result["ex_dividend_date"] = _pick_event_date(dated, today)
 
-        if earnings_dt is not None and pd.notna(earnings_dt):
-            result["next_earnings_date"] = pd.Timestamp(earnings_dt).date().isoformat()
-
-        # Ex-dividend date: prefer the forward-looking calendar (which carries the
-        # upcoming ex-div), then fall back to fast_info. Past-only sources are not
-        # used since the only consumer is a "before expiration" risk warning.
-        def _coerce_iso_date(value) -> Optional[str]:
-            if value is None:
-                return None
-            parsed = pd.to_datetime(value, errors="coerce")
-            if pd.isna(parsed):
-                return None
-            try:
-                return pd.Timestamp(parsed).date().isoformat()
-            except (AttributeError, ValueError):
-                return None
-
-        ex_div_iso = None
-        try:
-            cal = tkr.calendar
-            cal_val = None
-            if isinstance(cal, dict):
-                cal_val = cal.get("Ex-Dividend Date")
-            elif isinstance(cal, pd.DataFrame) and not cal.empty and "Ex-Dividend Date" in cal.index:
-                cal_val = cal.loc["Ex-Dividend Date"].iloc[0]
-            ex_div_iso = _coerce_iso_date(cal_val)
-        except Exception:
-            logger.debug("yfinance calendar ex-div fetch failed for %s", ticker_symbol, exc_info=True)
-
-        if ex_div_iso is None:
-            try:
-                fast_info = getattr(tkr, "fast_info", None)
-                ex_div = None
-                if isinstance(fast_info, dict):
-                    ex_div = fast_info.get("exDividendDate")
-                elif fast_info is not None:
-                    ex_div = getattr(fast_info, "exDividendDate", None)
-                if ex_div is not None:
-                    parsed = pd.to_datetime(ex_div, unit="s", errors="coerce")
-                    if pd.isna(parsed):
-                        parsed = pd.to_datetime(ex_div, errors="coerce")
-                    ex_div_iso = _coerce_iso_date(parsed)
-            except Exception:
-                logger.debug("yfinance fast_info ex-div fetch failed for %s", ticker_symbol, exc_info=True)
-
-        result["ex_dividend_date"] = ex_div_iso
-
-        # Trailing-twelve-month dividend total. Tradier quotes don't carry a
-        # dividend yield, so we derive one (divided by spot at the call site).
-        try:
-            divs = tkr.dividends
-            if divs is not None and not divs.empty:
-                div_dates = pd.to_datetime(divs.index, errors="coerce")
-                try:
-                    div_dates = div_dates.tz_localize(None)
-                except (TypeError, AttributeError):
-                    pass
-                cutoff = pd.Timestamp(datetime.now(NY_TZ).date()) - pd.Timedelta(days=365)
-                mask = np.asarray(div_dates >= cutoff)
-                if mask.any():
-                    ttm = float(np.nansum(divs.to_numpy()[mask]))
-                    if ttm > 0:
-                        result["trailing_annual_dividend"] = ttm
-        except Exception:
-            logger.debug("yfinance trailing dividend fetch failed for %s", ticker_symbol, exc_info=True)
-
+            cutoff = today - timedelta(days=365)
+            ttm = 0.0
+            for iso, row in by_ex_date.items():
+                ex_d = datetime.strptime(iso, "%Y-%m-%d").date()
+                if cutoff <= ex_d <= today:
+                    amt = safe_float(_row_value(row, "cash_amount", "amount"))
+                    if not np.isnan(amt) and amt > 0:
+                        ttm += amt
+            if ttm > 0:
+                result["trailing_annual_dividend"] = ttm
     except Exception:
-        logger.warning("Yahoo event enrichment failed entirely for %s", ticker_symbol, exc_info=True)
+        logger.warning("Tradier dividends fetch failed for %s", ticker_symbol, exc_info=True)
+
+    # --- Corporate calendar: next earnings date ---
+    try:
+        payload = tradier_fundamentals_get(
+            "/markets/fundamentals/calendars", params={"symbols": ticker_symbol}
+        )
+        cal_rows = _collect_fundamentals_rows(payload, "corporate_calendars")
+
+        earnings_dates = []
+        for row in cal_rows:
+            event_text = _row_value(row, "event")
+            event_type = _row_value(row, "event_type")
+            is_earnings = (
+                isinstance(event_text, str) and "earnings" in event_text.lower()
+            ) or str(event_type) == "14"  # Morningstar earnings event_type
+            if not is_earnings:
+                continue
+            iso = _iso_date(_row_value(row, "begin_date_time", "begin_date"))
+            if iso is not None:
+                earnings_dates.append((datetime.strptime(iso, "%Y-%m-%d").date(), iso))
+
+        result["next_earnings_date"] = _pick_event_date(earnings_dates, today)
+    except Exception:
+        logger.warning("Tradier calendar fetch failed for %s", ticker_symbol, exc_info=True)
 
     return result

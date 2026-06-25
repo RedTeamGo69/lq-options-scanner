@@ -20,7 +20,7 @@ from pricing import (
 from data import (
     get_quote_and_history,
     get_expiration_dates,
-    get_yahoo_events,
+    get_tradier_fundamentals,
     get_risk_free_rate,
     get_company_name,
     get_option_chain,
@@ -132,7 +132,7 @@ def display_summary(
     rv60: Optional[float],
     rv120: Optional[float],
     forecast_vol: Optional[float],
-    yahoo_events: Dict[str, Optional[str]],
+    fundamentals: Dict[str, Optional[str]],
     iv_stats: Dict[str, Optional[float]],
     base_forecast_vol: Optional[float] = None,
     ts_factor: Optional[float] = None,
@@ -170,15 +170,15 @@ def display_summary(
     c9, c10, c11, c12 = st.columns(4)
     c9.metric("Local IV Rank", f"{iv_stats['iv_rank']:.0f}%" if iv_stats["iv_rank"] is not None else "N/A")
     c10.metric("Local IV Percentile", f"{iv_stats['iv_percentile']:.0f}%" if iv_stats["iv_percentile"] is not None else "N/A")
-    c11.metric("Next Earnings", yahoo_events.get("next_earnings_date") or "N/A")
-    c12.metric("Ex-Div Date", yahoo_events.get("ex_dividend_date") or "N/A")
+    c11.metric("Next Earnings", fundamentals.get("next_earnings_date") or "N/A")
+    c12.metric("Ex-Div Date", fundamentals.get("ex_dividend_date") or "N/A")
 
 
-def display_event_warnings(yahoo_events: Dict[str, Optional[str]], target_date: str) -> None:
+def display_event_warnings(fundamentals: Dict[str, Optional[str]], target_date: str) -> None:
     today_ny = datetime.now(NY_TZ).date()
     expiry_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
 
-    earn_str = yahoo_events.get("next_earnings_date")
+    earn_str = fundamentals.get("next_earnings_date")
     if earn_str:
         try:
             earn_dt = datetime.strptime(earn_str, "%Y-%m-%d").date()
@@ -187,7 +187,7 @@ def display_event_warnings(yahoo_events: Dict[str, Optional[str]], target_date: 
         except Exception:
             logger.debug("Failed to parse earnings date: %s", earn_str, exc_info=True)
 
-    ex_div_str = yahoo_events.get("ex_dividend_date")
+    ex_div_str = fundamentals.get("ex_dividend_date")
     if ex_div_str:
         try:
             ex_dt = datetime.strptime(ex_div_str, "%Y-%m-%d").date()
@@ -289,7 +289,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         try:
             market_data = get_quote_and_history(ticker)
             expirations = get_expiration_dates(ticker)
-            yahoo_events = get_yahoo_events(ticker)
+            fundamentals = get_tradier_fundamentals(ticker)
         except requests.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status == 429:
@@ -307,10 +307,10 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
 
     S = market_data["price"]
     q = market_data["div_yield"]
-    # Tradier quotes don't carry a dividend yield, so derive one from Yahoo's
-    # trailing-twelve-month dividend total when Tradier reports none.
+    # Tradier quotes don't carry a dividend yield, so derive one from the
+    # fundamentals trailing-twelve-month dividend total when the quote reports none.
     if (q is None or q <= 0) and S > 0:
-        ttm_div = yahoo_events.get("trailing_annual_dividend")
+        ttm_div = fundamentals.get("trailing_annual_dividend")
         if ttm_div:
             q = min(float(ttm_div) / S, 0.25)
     hist = market_data["history"]
@@ -393,7 +393,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                         effective_forecast_vol, earnings_adj_applied = adjust_forecast_vol_for_earnings(
                             forecast_vol=effective_forecast_vol,
                             T=T,
-                            earnings_date_str=yahoo_events.get("next_earnings_date"),
+                            earnings_date_str=fundamentals.get("next_earnings_date"),
                             expiration_date_str=target_date,
                             expected_earnings_move=cfg.expected_earnings_move,
                         )
@@ -429,7 +429,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                     "ts_factor": ts_factor,
                     "earnings_adj_applied": earnings_adj_applied,
                     "expiration": target_date,
-                    "yahoo_events": yahoo_events,
+                    "fundamentals": fundamentals,
                     "iv_stats": iv_stats,
                     "rv20": rv20,
                     "rv60": rv60,
@@ -461,7 +461,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             rv60=rv60,
             rv120=rv120,
             forecast_vol=forecast_vol,
-            yahoo_events=yahoo_events,
+            fundamentals=fundamentals,
             iv_stats={"iv_rank": None, "iv_percentile": None, "hist_count": 0, "iv_min": None, "iv_max": None},
         )
         st.caption("Pick an expiration and click Scan Chain.")
@@ -479,14 +479,14 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         rv60=cached["rv60"],
         rv120=cached["rv120"],
         forecast_vol=cached["forecast_vol"],
-        yahoo_events=cached["yahoo_events"],
+        fundamentals=cached["fundamentals"],
         iv_stats=cached["iv_stats"],
         base_forecast_vol=cached.get("base_forecast_vol"),
         ts_factor=cached.get("ts_factor"),
         earnings_adj_applied=cached.get("earnings_adj_applied", False),
     )
 
-    display_event_warnings(cached["yahoo_events"], cached["expiration"])
+    display_event_warnings(cached["fundamentals"], cached["expiration"])
 
     best_df = cached["best_df"]
     term_df = cached["term_df"]
