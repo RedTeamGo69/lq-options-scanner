@@ -107,8 +107,8 @@ def _handle_remove_ticker() -> None:
 st.title("📈 LQ Quant Options Value Screener v3")
 st.markdown(
     "Scan any ticker for the single contracts that screen cheapest to buy or richest to sell "
-    "versus a realized-vol model. Tradier powers live chain pricing and Greeks; Yahoo adds earnings "
-    "and ex-dividend dates; SQLite stores daily ATM IV snapshots to build its own IV history over time."
+    "versus a realized-vol model. Tradier powers live chain pricing, Greeks, earnings, and "
+    "ex-dividend dates; SQLite stores daily ATM IV snapshots to build its own IV history over time."
 )
 
 if not TRADIER_API_KEY:
