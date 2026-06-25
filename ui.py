@@ -307,6 +307,12 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
 
     S = market_data["price"]
     q = market_data["div_yield"]
+    # Tradier quotes don't carry a dividend yield, so derive one from Yahoo's
+    # trailing-twelve-month dividend total when Tradier reports none.
+    if (q is None or q <= 0) and S > 0:
+        ttm_div = yahoo_events.get("trailing_annual_dividend")
+        if ttm_div:
+            q = min(float(ttm_div) / S, 0.25)
     hist = market_data["history"]
     r = get_risk_free_rate()
     company_name = get_company_name(ticker)
@@ -370,6 +376,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                         ticker=ticker,
                         current_iv=current_atm_iv,
                         lookback_days=cfg.iv_history_lookback_days,
+                        target_dte=dte,
                     )
 
                 effective_forecast_vol = forecast_vol

@@ -256,10 +256,11 @@ def get_option_chain(ticker_symbol: str, expiration: str) -> pd.DataFrame:
 # YAHOO ENRICHMENT
 # ============================================================
 @st.cache_data(ttl=3600)
-def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
-    result = {
+def get_yahoo_events(ticker_symbol: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
         "next_earnings_date": None,
         "ex_dividend_date": None,
+        "trailing_annual_dividend": None,
     }
 
     try:
@@ -285,55 +286,85 @@ def get_yahoo_events(ticker_symbol: str) -> Dict[str, Optional[str]]:
         if earnings_dt is None:
             try:
                 cal = tkr.calendar
-                if isinstance(cal, pd.DataFrame) and not cal.empty:
-                    for col in cal.columns:
-                        for val in cal[col].tolist():
-                            parsed = pd.to_datetime(val, errors="coerce")
-                            if pd.notna(parsed):
-                                earnings_dt = parsed
-                                break
-                        if earnings_dt is not None:
-                            break
+                cal_earnings = None
+                if isinstance(cal, dict):
+                    cal_earnings = cal.get("Earnings Date")
+                    if isinstance(cal_earnings, (list, tuple)):
+                        cal_earnings = cal_earnings[0] if cal_earnings else None
+                elif isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
+                    cal_earnings = cal.loc["Earnings Date"].iloc[0]
+                if cal_earnings is not None:
+                    parsed = pd.to_datetime(cal_earnings, errors="coerce")
+                    if pd.notna(parsed):
+                        earnings_dt = parsed
             except Exception:
                 logger.debug("yfinance calendar fallback failed for %s", ticker_symbol, exc_info=True)
 
         if earnings_dt is not None and pd.notna(earnings_dt):
             result["next_earnings_date"] = pd.Timestamp(earnings_dt).date().isoformat()
 
+        # Ex-dividend date: prefer the forward-looking calendar (which carries the
+        # upcoming ex-div), then fall back to fast_info. Past-only sources are not
+        # used since the only consumer is a "before expiration" risk warning.
+        def _coerce_iso_date(value) -> Optional[str]:
+            if value is None:
+                return None
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            try:
+                return pd.Timestamp(parsed).date().isoformat()
+            except (AttributeError, ValueError):
+                return None
+
+        ex_div_iso = None
         try:
-            fast_info = getattr(tkr, "fast_info", None)
-            if fast_info:
+            cal = tkr.calendar
+            cal_val = None
+            if isinstance(cal, dict):
+                cal_val = cal.get("Ex-Dividend Date")
+            elif isinstance(cal, pd.DataFrame) and not cal.empty and "Ex-Dividend Date" in cal.index:
+                cal_val = cal.loc["Ex-Dividend Date"].iloc[0]
+            ex_div_iso = _coerce_iso_date(cal_val)
+        except Exception:
+            logger.debug("yfinance calendar ex-div fetch failed for %s", ticker_symbol, exc_info=True)
+
+        if ex_div_iso is None:
+            try:
+                fast_info = getattr(tkr, "fast_info", None)
                 ex_div = None
                 if isinstance(fast_info, dict):
                     ex_div = fast_info.get("exDividendDate")
-                else:
+                elif fast_info is not None:
                     ex_div = getattr(fast_info, "exDividendDate", None)
-
                 if ex_div is not None:
                     parsed = pd.to_datetime(ex_div, unit="s", errors="coerce")
                     if pd.isna(parsed):
                         parsed = pd.to_datetime(ex_div, errors="coerce")
-                    if pd.notna(parsed):
-                        result["ex_dividend_date"] = parsed.date().isoformat()
-        except Exception:
-            logger.debug("yfinance fast_info ex-div fetch failed for %s", ticker_symbol, exc_info=True)
-
-        if result["ex_dividend_date"] is None:
-            try:
-                actions = tkr.actions
-                if actions is not None and not actions.empty and "Dividends" in actions.columns:
-                    divs = actions[actions["Dividends"] > 0].copy()
-                    if not divs.empty:
-                        divs = divs.reset_index()
-                        date_col = divs.columns[0]
-                        divs[date_col] = pd.to_datetime(divs[date_col], errors="coerce")
-                        divs = divs.dropna(subset=[date_col]).sort_values(date_col)
-                        today = pd.Timestamp(datetime.now(NY_TZ).date())
-                        future_divs = divs[divs[date_col].dt.date >= today.date()]
-                        if not future_divs.empty:
-                            result["ex_dividend_date"] = future_divs.iloc[0][date_col].date().isoformat()
+                    ex_div_iso = _coerce_iso_date(parsed)
             except Exception:
-                logger.debug("yfinance dividend actions fallback failed for %s", ticker_symbol, exc_info=True)
+                logger.debug("yfinance fast_info ex-div fetch failed for %s", ticker_symbol, exc_info=True)
+
+        result["ex_dividend_date"] = ex_div_iso
+
+        # Trailing-twelve-month dividend total. Tradier quotes don't carry a
+        # dividend yield, so we derive one (divided by spot at the call site).
+        try:
+            divs = tkr.dividends
+            if divs is not None and not divs.empty:
+                div_dates = pd.to_datetime(divs.index, errors="coerce")
+                try:
+                    div_dates = div_dates.tz_localize(None)
+                except (TypeError, AttributeError):
+                    pass
+                cutoff = pd.Timestamp(datetime.now(NY_TZ).date()) - pd.Timedelta(days=365)
+                mask = np.asarray(div_dates >= cutoff)
+                if mask.any():
+                    ttm = float(np.nansum(divs.to_numpy()[mask]))
+                    if ttm > 0:
+                        result["trailing_annual_dividend"] = ttm
+        except Exception:
+            logger.debug("yfinance trailing dividend fetch failed for %s", ticker_symbol, exc_info=True)
 
     except Exception:
         logger.warning("Yahoo event enrichment failed entirely for %s", ticker_symbol, exc_info=True)
