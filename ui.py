@@ -246,6 +246,41 @@ def display_interpretation(best_df: pd.DataFrame, action: str, forecast_vol: flo
     st.info(msg)
 
 
+def display_headline_pick(ticker: str, action: str, option_family: str, best_df: pd.DataFrame, expiration: str) -> None:
+    """Surface the single top-ranked contract as a prominent one-line recommendation."""
+    if best_df.empty:
+        return
+
+    top = best_df.iloc[0]
+    opt_label = "CALL" if option_family == "CALLS" else "PUT"
+    verb = "Best buy" if action == "BUY" else "Best sell"
+
+    strike = float(top["Strike"])
+    strike_label = f"{strike:,.0f}" if strike.is_integer() else f"{strike:,.2f}"
+    exec_px = float(top["Exec Px"])
+
+    metrics = []
+    edge = top["Value Edge (%)"]
+    if pd.notna(edge):
+        metrics.append(f"value edge {edge:+.1f}%")
+    conf = top["Confidence"]
+    if pd.notna(conf):
+        metrics.append(f"confidence {conf:.0f}/100")
+    delta = top["Delta"]
+    if pd.notna(delta):
+        metrics.append(f"Δ {delta:+.2f}")
+    # Annualized yield is only meaningful on the sell side (premium collection)
+    ann_yld = top.get("Ann Yield (%)", np.nan)
+    if action == "SELL" and pd.notna(ann_yld):
+        metrics.append(f"ann. yield {ann_yld:.1f}%")
+
+    detail = " — " + ", ".join(metrics) if metrics else ""
+    st.success(
+        f"\U0001F3AF **{verb}: {ticker} ${strike_label} {opt_label} @ ${exec_px:.2f}** "
+        f"(exp {expiration}){detail}"
+    )
+
+
 # ============================================================
 # PROCESS TICKER
 # ============================================================
@@ -456,6 +491,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         st.warning("No contracts passed the filters.")
         return
 
+    display_headline_pick(ticker, action, option_family, best_df, cached["expiration"])
     display_expected_moves(cached["S"], cached["T"], cached["forecast_vol"], best_df)
     display_interpretation(best_df, action, forecast_vol=cached["forecast_vol"])
 
