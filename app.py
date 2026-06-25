@@ -14,6 +14,39 @@ st.set_page_config(
     layout="wide",
 )
 
+# Custom styling for less prominent scrollbars
+st.markdown(
+    """
+    <style>
+    /* Firefox scrollbar */
+    * {
+        scrollbar-width: thin;
+        scrollbar-color: #444 #1a1a1a;
+    }
+
+    /* Chrome/Safari/Edge scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: #1a1a1a;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: #444;
+        border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: #555;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ============================================================
 # INIT
 # ============================================================
