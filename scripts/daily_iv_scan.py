@@ -20,6 +20,11 @@ import psycopg2
 import pytz
 import requests
 
+# Allow importing the shared default ticker list from the repo root, regardless
+# of the working directory the workflow launches this script from.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tickers_default import DEFAULT_TICKERS
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -30,22 +35,6 @@ logger = logging.getLogger(__name__)
 TRADIER_API_KEY = os.environ["TRADIER_API_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 TRADIER_BASE = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1").rstrip("/")
-
-TICKERS = [
-    # Mega-cap / tech
-    "NVDA", "AAPL", "GOOG", "GOOGL", "MSFT", "AMZN", "TSM", "AVGO",
-    "TSLA", "META", "NFLX", "ORCL", "PLTR", "ARM", "INTC", "MU", "AMD",
-    # Index / ETF
-    "SPX", "XSP", "NDX", "SPY", "QQQ", "IBIT", "SCHD",
-    # Financials
-    "JPM", "BAC", "WFC", "GS", "MS", "KEY", "COIN", "HOOD", "AFRM", "SOFI", "OWL",
-    # Healthcare / consumer / industrial
-    "LLY", "NVO", "JNJ", "WMT", "COST", "EBAY", "HIMS", "UNH",
-    # Blue chips
-    "BRK.B", "V", "MA", "XOM", "CVX", "VZ", "F",
-    # Other
-    "NU", "CRWV", "SOLS",
-]
 
 HEADERS = {
     "Authorization": f"Bearer {TRADIER_API_KEY}",
@@ -162,7 +151,40 @@ def ensure_table(conn):
             CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
             ON iv_snapshots (ticker, snapshot_date)
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_tickers (
+                ticker TEXT PRIMARY KEY,
+                added_at TEXT NOT NULL
+            )
+        """)
     conn.commit()
+
+
+def load_tickers(conn) -> list[str]:
+    """Read the tracked-ticker universe from the database.
+
+    Seeds the table with the shared default list the first time it is empty,
+    so a brand-new database still scans the full universe. After that the table
+    (managed from the app's sidebar) is the source of truth.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM tracked_tickers")
+        if cur.fetchone()[0] == 0:
+            now = datetime.now(pytz.timezone("America/New_York")).isoformat()
+            for tkr in DEFAULT_TICKERS:
+                cur.execute(
+                    "INSERT INTO tracked_tickers (ticker, added_at) VALUES (%s, %s) "
+                    "ON CONFLICT (ticker) DO NOTHING",
+                    (tkr.upper(), now),
+                )
+            conn.commit()
+            logger.info(f"Seeded tracked_tickers with {len(DEFAULT_TICKERS)} defaults")
+
+        cur.execute("SELECT ticker FROM tracked_tickers ORDER BY ticker")
+        tickers = [row[0] for row in cur.fetchall()]
+
+    # Defensive fallback: never run an empty scan.
+    return tickers or list(DEFAULT_TICKERS)
 
 
 def save_row(conn, snapshot_date: str, ticker: str, expiration: str,
@@ -195,10 +217,13 @@ def main():
     try:
         ensure_table(conn)
 
+        tickers = load_tickers(conn)
+        logger.info(f"Scanning {len(tickers)} tracked tickers")
+
         total_rows = 0
         errors = 0
 
-        for ticker in TICKERS:
+        for ticker in tickers:
             try:
                 spot = get_spot(ticker)
                 expirations = get_expirations(ticker)
@@ -245,7 +270,7 @@ def main():
 
     logger.info(f"Done. {total_rows} rows saved, {errors} ticker errors.")
 
-    if errors > len(TICKERS) // 2:
+    if errors > len(tickers) // 2:
         logger.error("More than half of tickers failed!")
         sys.exit(1)
 

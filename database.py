@@ -10,6 +10,8 @@ import pandas as pd
 import streamlit as st
 
 from config import DB_PATH, NY_TZ
+from tickers_default import DEFAULT_TICKERS
+from utils import dedupe_preserve_order
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,13 @@ def init_db() -> bool:
                 CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
                 ON iv_snapshots (ticker, snapshot_date)
             """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tracked_tickers (
+                    ticker TEXT PRIMARY KEY,
+                    added_at TEXT NOT NULL
+                )
+            """)
         else:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS iv_snapshots (
@@ -110,6 +119,27 @@ def init_db() -> bool:
                 CREATE INDEX IF NOT EXISTS idx_iv_snapshots_ticker_date
                 ON iv_snapshots (ticker, snapshot_date)
             """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tracked_tickers (
+                    ticker TEXT PRIMARY KEY,
+                    added_at TEXT NOT NULL
+                )
+            """)
+
+        # Seed the tracked-ticker universe on first run so the daily scan and
+        # the sidebar both start from the known default list.
+        cur.execute("SELECT COUNT(*) FROM tracked_tickers")
+        count = cur.fetchone()[0]
+        if count == 0:
+            now = datetime.now(NY_TZ).isoformat()
+            ph = "%s" if _use_postgres() else "?"
+            for tkr in DEFAULT_TICKERS:
+                cur.execute(
+                    f"INSERT INTO tracked_tickers (ticker, added_at) VALUES ({ph}, {ph}) "
+                    f"ON CONFLICT (ticker) DO NOTHING",
+                    (tkr.upper(), now),
+                )
 
         conn.commit()
     return True
@@ -251,3 +281,50 @@ def compute_local_iv_rank_and_percentile(
         "iv_min": iv_min,
         "iv_max": iv_max,
     }
+
+
+# ============================================================
+# TRACKED TICKERS (daily IV scan universe)
+# ============================================================
+def get_tracked_tickers() -> list:
+    """Return the alphabetically-sorted list of tickers the daily scan tracks."""
+    with db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT ticker FROM tracked_tickers ORDER BY ticker")
+        return [row[0] for row in cur.fetchall()]
+
+
+def add_tracked_tickers(tickers) -> list:
+    """Add one or more tickers. Returns the list actually inserted (new ones)."""
+    cleaned = dedupe_preserve_order(
+        [t.strip().upper() for t in tickers if t and t.strip()]
+    )
+    if not cleaned:
+        return []
+
+    existing = set(get_tracked_tickers())
+    to_add = [t for t in cleaned if t not in existing]
+    if not to_add:
+        return []
+
+    now = datetime.now(NY_TZ).isoformat()
+    with db_connection() as conn:
+        cur = conn.cursor()
+        ph = "%s" if _use_postgres() else "?"
+        for tkr in to_add:
+            cur.execute(
+                f"INSERT INTO tracked_tickers (ticker, added_at) VALUES ({ph}, {ph}) "
+                f"ON CONFLICT (ticker) DO NOTHING",
+                (tkr, now),
+            )
+        conn.commit()
+    return to_add
+
+
+def remove_tracked_ticker(ticker: str) -> None:
+    """Remove a single ticker from the tracked universe."""
+    with db_connection() as conn:
+        cur = conn.cursor()
+        ph = "%s" if _use_postgres() else "?"
+        cur.execute(f"DELETE FROM tracked_tickers WHERE ticker = {ph}", (ticker.strip().upper(),))
+        conn.commit()
