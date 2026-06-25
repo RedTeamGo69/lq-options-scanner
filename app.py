@@ -57,6 +57,11 @@ st.markdown(
 # ============================================================
 _ = init_db()
 
+# Track whether the Daily IV Tracking expander should be expanded.
+# Persists through reruns, so it stays open when you add/remove tickers.
+if "ticker_expander_open" not in st.session_state:
+    st.session_state.ticker_expander_open = False
+
 st.title("📈 LQ Quant Options Value Screener v3")
 st.markdown(
     "Scan any ticker for the single contracts that screen cheapest to buy or richest to sell "
@@ -83,7 +88,7 @@ with st.sidebar:
     # job collects — no code changes needed.
     st.divider()
     tracked = get_tracked_tickers()
-    with st.expander(f"🗓️ Daily IV Tracking ({len(tracked)})", expanded=False):
+    with st.expander(f"🗓️ Daily IV Tracking ({len(tracked)})", expanded=st.session_state.ticker_expander_open):
         st.caption(
             "Tickers the nightly scan logs ATM IV for. Stored in the database, "
             "so changes here take effect on the next scheduled run."
@@ -106,6 +111,7 @@ with st.sidebar:
                 added = add_tracked_tickers(valid)
                 if added:
                     st.success(f"Added: {', '.join(added)}")
+                    st.session_state.ticker_expander_open = True
                     st.rerun()
                 else:
                     st.info("Already tracked — nothing to add.")
@@ -119,6 +125,7 @@ with st.sidebar:
             if st.button("🗑️ Remove", use_container_width=True, disabled=(to_remove == "—")):
                 remove_tracked_ticker(to_remove)
                 st.success(f"Removed: {to_remove}")
+                st.session_state.ticker_expander_open = True
                 st.rerun()
 
             st.caption("Currently tracked:")
