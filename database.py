@@ -245,26 +245,41 @@ def compute_local_iv_rank_and_percentile(
     ticker: str,
     current_iv: float,
     lookback_days: int = 252,
+    target_dte: Optional[int] = None,
 ) -> Dict[str, Optional[float]]:
+    empty = {
+        "iv_rank": None,
+        "iv_percentile": None,
+        "hist_count": 0,
+        "iv_min": None,
+        "iv_max": None,
+    }
+
     hist = get_local_iv_history(ticker, lookback_days=lookback_days, expiration=None)
     if hist.empty or "atm_avg_iv" not in hist.columns:
-        return {
-            "iv_rank": None,
-            "iv_percentile": None,
-            "hist_count": 0,
-            "iv_min": None,
-            "iv_max": None,
-        }
+        return dict(empty)
 
-    series = pd.to_numeric(hist["atm_avg_iv"], errors="coerce").dropna()
+    hist = hist.copy()
+    hist["atm_avg_iv"] = pd.to_numeric(hist["atm_avg_iv"], errors="coerce")
+    hist = hist.dropna(subset=["atm_avg_iv"])
+    if hist.empty:
+        return dict(empty)
+
+    # Constant-maturity comparison: for each snapshot day, keep the expiration
+    # whose DTE is closest to the one being scanned, so the rank compares
+    # like-for-like tenors instead of pooling every expiration together.
+    if target_dte is not None and "dte" in hist.columns and "snapshot_date" in hist.columns:
+        h = hist.copy()
+        h["dte"] = pd.to_numeric(h["dte"], errors="coerce")
+        h = h.dropna(subset=["dte"])
+        if not h.empty:
+            h["_dte_dist"] = (h["dte"] - target_dte).abs()
+            h = h.sort_values("_dte_dist").groupby("snapshot_date", as_index=False).first()
+            hist = h
+
+    series = hist["atm_avg_iv"].dropna()
     if series.empty:
-        return {
-            "iv_rank": None,
-            "iv_percentile": None,
-            "hist_count": 0,
-            "iv_min": None,
-            "iv_max": None,
-        }
+        return dict(empty)
 
     iv_min = float(series.min())
     iv_max = float(series.max())

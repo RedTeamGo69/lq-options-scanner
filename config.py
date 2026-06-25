@@ -8,6 +8,9 @@ import pytz
 # ENV / CONSTANTS
 # ============================================================
 TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1").rstrip("/")
+TRADIER_FUNDAMENTALS_BASE_URL = os.getenv(
+    "TRADIER_FUNDAMENTALS_BASE_URL", "https://api.tradier.com/beta"
+).rstrip("/")
 TRADIER_API_KEY = os.getenv("TRADIER_API_KEY", "")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred").rstrip("/")
