@@ -47,6 +47,11 @@ st.markdown(
     ::-webkit-scrollbar-thumb:hover {
         background: #555;
     }
+
+    /* Hide the "Press Enter to submit form" hint inside text inputs */
+    [data-testid="InputInstructions"] {
+        display: none;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -61,6 +66,43 @@ _ = init_db()
 # Persists through reruns, so it stays open when you add/remove tickers.
 if "ticker_expander_open" not in st.session_state:
     st.session_state.ticker_expander_open = False
+
+
+def _handle_add_tickers() -> None:
+    """Add ticker(s) from the sidebar form. Runs as a submit callback (before
+    the rerun) so the expander stays open and a status message can be shown."""
+    st.session_state.ticker_expander_open = True
+    raw_input = st.session_state.get("add_ticker_input", "").strip().upper()
+    raw = [t.strip() for t in raw_input.split(",") if t.strip()]
+    invalid = [t for t in raw if not TICKER_PATTERN.match(t)]
+    valid = [t for t in raw if TICKER_PATTERN.match(t)]
+
+    messages = []
+    if invalid:
+        messages.append(("warning", f"Skipped invalid: {', '.join(invalid)}"))
+    if valid:
+        added = add_tracked_tickers(valid)
+        if added:
+            messages.append(("success", f"Added: {', '.join(added)}"))
+        else:
+            messages.append(("info", "Already tracked — nothing to add."))
+    elif not invalid:
+        messages.append(("warning", "Enter a ticker symbol to add."))
+
+    st.session_state.ticker_flash = messages
+
+
+def _handle_remove_ticker() -> None:
+    """Remove the selected ticker. Runs as a button callback so the expander
+    stays open and a status message can be shown."""
+    st.session_state.ticker_expander_open = True
+    tkr = st.session_state.get("remove_ticker_select", "—")
+    if tkr and tkr != "—":
+        remove_tracked_ticker(tkr)
+        st.session_state.ticker_flash = [("success", f"Removed: {tkr}")]
+        # Reset the dropdown so its stored value isn't a now-removed option.
+        st.session_state.remove_ticker_select = "—"
+
 
 st.title("📈 LQ Quant Options Value Screener v3")
 st.markdown(
@@ -95,38 +137,29 @@ with st.sidebar:
         )
 
         with st.form("add_ticker_form", clear_on_submit=True):
-            new_ticker_input = st.text_input(
+            st.text_input(
                 "Add ticker(s)",
                 placeholder="e.g. AAPL or AAPL, TSLA",
-            ).strip().upper()
-            add_clicked = st.form_submit_button("➕ Add", use_container_width=True)
+                key="add_ticker_input",
+            )
+            st.form_submit_button(
+                "➕ Add", use_container_width=True, on_click=_handle_add_tickers
+            )
 
-        if add_clicked:
-            raw = [t.strip() for t in new_ticker_input.split(",") if t.strip()]
-            invalid = [t for t in raw if not TICKER_PATTERN.match(t)]
-            valid = [t for t in raw if TICKER_PATTERN.match(t)]
-            if invalid:
-                st.warning(f"Skipped invalid: {', '.join(invalid)}")
-            if valid:
-                added = add_tracked_tickers(valid)
-                if added:
-                    st.success(f"Added: {', '.join(added)}")
-                    st.session_state.ticker_expander_open = True
-                    st.rerun()
-                else:
-                    st.info("Already tracked — nothing to add.")
-            elif not invalid:
-                st.warning("Enter a ticker symbol to add.")
+        # Status message from the most recent add/remove, shown in-place.
+        for level, text in st.session_state.pop("ticker_flash", []):
+            getattr(st, level)(text)
 
         if tracked:
             to_remove = st.selectbox(
-                "Remove a ticker", ["—"] + tracked, index=0
+                "Remove a ticker", ["—"] + tracked, index=0, key="remove_ticker_select"
             )
-            if st.button("🗑️ Remove", use_container_width=True, disabled=(to_remove == "—")):
-                remove_tracked_ticker(to_remove)
-                st.success(f"Removed: {to_remove}")
-                st.session_state.ticker_expander_open = True
-                st.rerun()
+            st.button(
+                "🗑️ Remove",
+                use_container_width=True,
+                disabled=(to_remove == "—"),
+                on_click=_handle_remove_ticker,
+            )
 
             st.caption("Currently tracked:")
             st.write(", ".join(tracked))
