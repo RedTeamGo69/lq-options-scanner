@@ -42,14 +42,12 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Columns shown in the simplified table view (full data is in CSV download)
 _DISPLAY_COLS_SELL = [
-    "Moneyness", "Strike", "Bid", "Ask", "IV Edge (vol pts)", "RV Edge (vol pts)", "$ Edge",
-    "Spread (%)", "Mkt IV (%)", "Fair IV (%)", "Delta", "Theta",
-    "OI", "Vol", "Ann Yield (%)", "Confidence",
+    "Moneyness", "Strike", "Bid", "Ask", "IV Edge (vol pts)", "$ Edge",
+    "Spread (%)", "Delta", "Ann Yield (%)", "Confidence",
 ]
 _DISPLAY_COLS_BUY = [
-    "Moneyness", "Strike", "Bid", "Ask", "IV Edge (vol pts)", "RV Edge (vol pts)", "$ Edge",
-    "Spread (%)", "Mkt IV (%)", "Fair IV (%)", "Delta", "Theta",
-    "OI", "Vol", "Confidence",
+    "Moneyness", "Strike", "Bid", "Ask", "IV Edge (vol pts)", "$ Edge",
+    "Spread (%)", "Delta", "Confidence",
 ]
 
 
@@ -582,7 +580,6 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
     display_event_warnings(cached["fundamentals"], cached["expiration"])
 
     best_df = cached["best_df"]
-    term_df = cached["term_df"]
     put_skew_df = cached["put_skew_df"]
     call_skew_df = cached["call_skew_df"]
     iv_hist_df = cached["iv_hist_df"]
@@ -596,7 +593,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
     display_expected_moves(cached["S"], cached["T"], cached["forecast_vol"], best_df)
     display_interpretation(best_df, action, forecast_vol=cached["forecast_vol"])
 
-    tab_names = ["Top Contracts", "P&L Analysis", "Term Structure", "Put Skew", "Call Skew", "Local IV History"]
+    tab_names = ["Top Contracts", "P&L Analysis", "Put Skew", "Call Skew", "Local IV History"]
     tabs = st.tabs(tab_names)
 
     tab_map = {name: tab for name, tab in zip(tab_names, tabs)}
@@ -620,15 +617,29 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 "Bid": st.column_config.NumberColumn("Bid", format="$ %.2f"),
                 "Ask": st.column_config.NumberColumn("Ask", format="$ %.2f"),
                 "IV Edge (vol pts)": st.column_config.NumberColumn("IV Edge (vol pts)", format="%.1f"),
-                "RV Edge (vol pts)": st.column_config.NumberColumn("RV Edge (vol pts)", format="%.1f"),
                 "$ Edge": st.column_config.NumberColumn("$ Edge", format="$ %.0f"),
                 "Spread (%)": st.column_config.NumberColumn("Spread (%)", format="%.1f%%"),
-                "Mkt IV (%)": st.column_config.NumberColumn("Mkt IV (%)", format="%.1f%%"),
-                "Fair IV (%)": st.column_config.NumberColumn("Fair IV (%)", format="%.1f%%"),
                 "Ann Yield (%)": st.column_config.NumberColumn("Ann Yield (%)", format="%.1f%%"),
                 "Confidence": st.column_config.NumberColumn("Confidence", format="%.0f"),
             },
         )
+        with st.expander("ℹ️ What do these columns mean?"):
+            st.markdown(
+                "- **Moneyness** — where the strike sits vs. the current price: "
+                "**ITM** (in the money), **ATM** (at the money), **OTM** (out of the money).\n"
+                "- **Strike** — the contract's strike price.\n"
+                "- **Bid / Ask** — the price you can sell at (bid) and buy at (ask). "
+                "The gap between them is the bid–ask spread.\n"
+                "- **IV Edge (vol pts)** — how mispriced the option is, in volatility points, "
+                "**in your favor**. Higher / green is better; it's the core signal this scanner ranks on.\n"
+                "- **$ Edge** — that same edge translated into dollars per contract (1 contract = 100 shares).\n"
+                "- **Spread (%)** — the bid–ask spread as a % of price, i.e. how cheap and easy the "
+                "contract is to trade. Green = tight (good), red = wide (costly).\n"
+                "- **Delta** — how much the option's value moves for a $1 move in the stock "
+                "(roughly its odds of finishing in the money). Negative for puts.\n"
+                "- **Confidence** — a 0–100 composite rank combining edge, liquidity and spread. "
+                "Green ≥ 75 (strong), yellow 50–74 (moderate), red < 50 (weak)."
+            )
         st.caption("Full data with all Greeks and vol metrics available in CSV download below.")
 
         csv = best_df.to_csv(index=False).encode("utf-8")
@@ -676,15 +687,18 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
             st.subheader("Scenario Analysis")
             st.dataframe(scenario_df, use_container_width=True, hide_index=True)
 
-    # --- Term Structure tab ---
-    with tab_map["Term Structure"]:
-        st.subheader("ATM IV Term Structure")
-        if term_df.empty:
-            st.warning("No term-structure data available.")
-        else:
-            st.dataframe(term_df, use_container_width=True, hide_index=True)
-            chart_df = term_df.set_index("DTE")[["ATM Avg IV (%)"]]
-            st.line_chart(chart_df)
+        with st.expander("ℹ️ How to read the P&L chart"):
+            st.markdown(
+                "This is the profit/loss of the **top-ranked contract** (1 contract = 100 shares), "
+                "in dollars, across a range of stock prices.\n\n"
+                "- **Expiration P&L** — what the trade is worth if you hold it all the way to expiration.\n"
+                "- **Mid-Life P&L** — what it's worth roughly halfway to expiration; the gap between "
+                "the two lines shows how time decay erodes value.\n"
+                "- Where a line crosses **$0** is your **break-even** price.\n\n"
+                "The **Scenario Analysis** table below is the same thing as a quick grid: P&L at fixed "
+                "stock moves (−10% … +10%), plus **Net Delta** (how much you make/lose per $1 move) and "
+                "**Net Theta** (how much value you lose to time decay each day)."
+            )
 
     # --- Put Skew tab ---
     with tab_map["Put Skew"]:
@@ -694,6 +708,17 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         else:
             st.dataframe(put_skew_df, use_container_width=True, hide_index=True)
             st.line_chart(put_skew_df.set_index("Pct From Spot")[["IV (%)"]])
+            with st.expander("ℹ️ How to read the skew"):
+                st.markdown(
+                    "This is the **volatility smile/skew**: implied volatility (IV, the y-axis) for "
+                    "each put strike, plotted by its distance from the current price (% from spot, x-axis).\n\n"
+                    "- A **higher** line means the market is charging **more** volatility (a richer price) "
+                    "for options at that strike.\n"
+                    "- For stocks the curve usually **rises toward lower strikes** — downside protection "
+                    "is in demand, so out-of-the-money puts carry higher IV.\n"
+                    "- Use it as a sanity check: a strike poking **above** the smooth curve is relatively "
+                    "**expensive** vol, one sitting **below** it is relatively **cheap**."
+                )
 
     # --- Call Skew tab ---
     with tab_map["Call Skew"]:
@@ -703,6 +728,15 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         else:
             st.dataframe(call_skew_df, use_container_width=True, hide_index=True)
             st.line_chart(call_skew_df.set_index("Pct From Spot")[["IV (%)"]])
+            with st.expander("ℹ️ How to read the skew"):
+                st.markdown(
+                    "This is the **volatility smile/skew**: implied volatility (IV, the y-axis) for "
+                    "each call strike, plotted by its distance from the current price (% from spot, x-axis).\n\n"
+                    "- A **higher** line means the market is charging **more** volatility (a richer price) "
+                    "for options at that strike.\n"
+                    "- Use it as a sanity check: a strike poking **above** the smooth curve is relatively "
+                    "**expensive** vol, one sitting **below** it is relatively **cheap**."
+                )
 
     # --- Local IV History tab ---
     with tab_map["Local IV History"]:
