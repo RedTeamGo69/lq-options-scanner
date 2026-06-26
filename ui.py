@@ -30,6 +30,7 @@ from screening import (
     screen_chain,
     build_term_structure_snapshot,
     compute_term_structure_scaling_factor,
+    implied_earnings_move_from_term_structure,
     build_skew_snapshot,
 )
 
@@ -41,13 +42,13 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # Columns shown in the simplified table view (full data is in CSV download)
 _DISPLAY_COLS_SELL = [
-    "Moneyness", "Strike", "Bid", "Ask", "Value Edge (%)",
-    "Spread (%)", "Mkt IV (%)", "Delta", "Theta",
+    "Moneyness", "Strike", "Bid", "Ask", "IV Edge (vol pts)", "RV Edge (vol pts)", "$ Edge",
+    "Spread (%)", "Mkt IV (%)", "Fair IV (%)", "Delta", "Theta",
     "OI", "Vol", "Ann Yield (%)", "Confidence",
 ]
 _DISPLAY_COLS_BUY = [
-    "Moneyness", "Strike", "Bid", "Ask", "Value Edge (%)",
-    "Spread (%)", "Mkt IV (%)", "Delta", "Theta",
+    "Moneyness", "Strike", "Bid", "Ask", "IV Edge (vol pts)", "RV Edge (vol pts)", "$ Edge",
+    "Spread (%)", "Mkt IV (%)", "Fair IV (%)", "Delta", "Theta",
     "OI", "Vol", "Confidence",
 ]
 
@@ -58,17 +59,31 @@ def _get_display_columns(df: pd.DataFrame, action: str) -> list:
     return [c for c in template if c in df.columns]
 
 
-def style_results(df: pd.DataFrame, action: str = "SELL") -> Styler:
+def style_results(
+    df: pd.DataFrame,
+    action: str = "SELL",
+    edge_green: float = 2.0,
+    edge_red: float = -2.0,
+) -> Styler:
     display_cols = _get_display_columns(df, action)
     view = df[display_cols]
 
     def color_edge(val):
         if pd.isna(val):
             return ""
-        if val >= 5:
+        if val >= edge_green:
             return "color: #00FF88; font-weight: bold"
-        if val <= -5:
+        if val <= edge_red:
             return "color: #FF5A5A; font-weight: bold"
+        return ""
+
+    def color_dollar(val):
+        if pd.isna(val):
+            return ""
+        if val > 0:
+            return "color: #00FF88"
+        if val < 0:
+            return "color: #FF5A5A"
         return ""
 
     def color_spread(val):
@@ -100,7 +115,9 @@ def style_results(df: pd.DataFrame, action: str = "SELL") -> Styler:
 
     styler = view.style
     for col, func in {
-        "Value Edge (%)": color_edge,
+        "IV Edge (vol pts)": color_edge,
+        "RV Edge (vol pts)": color_edge,
+        "$ Edge": color_dollar,
         "Spread (%)": color_spread,
         "Confidence": color_conf,
         "Moneyness": color_moneyness,
@@ -111,8 +128,9 @@ def style_results(df: pd.DataFrame, action: str = "SELL") -> Styler:
     fmt = {}
     fmt_map = {
         "Strike": "{:,.2f}", "Bid": "{:,.2f}", "Ask": "{:,.2f}",
-        "Value Edge (%)": "{:,.1f}", "Spread (%)": "{:,.1f}",
-        "Mkt IV (%)": "{:,.1f}", "Delta": "{:,.3f}", "Theta": "{:,.4f}",
+        "IV Edge (vol pts)": "{:,.1f}", "RV Edge (vol pts)": "{:,.1f}", "$ Edge": "{:,.0f}",
+        "Spread (%)": "{:,.1f}",
+        "Mkt IV (%)": "{:,.1f}", "Fair IV (%)": "{:,.1f}", "Delta": "{:,.3f}", "Theta": "{:,.4f}",
         "Ann Yield (%)": "{:,.1f}", "Confidence": "{:,.0f}",
     }
     for col, f in fmt_map.items():
@@ -225,23 +243,54 @@ def display_expected_moves(S: float, T: float, forecast_vol: float, best_df: pd.
     )
 
 
+def display_level_signal(scan_meta: Dict, action: str) -> None:
+    """Surface-level read: is the whole vol surface rich/cheap vs realized, and
+    is that gap statistically meaningful (noise-gated z-score)?"""
+    if not scan_meta:
+        return
+    level = scan_meta.get("level_edge_volpts")
+    z = scan_meta.get("level_z")
+    gate = scan_meta.get("noise_gate_z", 1.0)
+    if level is None or z is None:
+        return
+
+    # level is favorable-signed for the chosen action; translate to an absolute
+    # rich/cheap read of the surface.
+    surface = "rich" if ((level > 0) == (action == "SELL")) else "cheap"
+    mkt_iv = scan_meta.get("market_atm_iv")
+    fv = scan_meta.get("fv_atm")
+    detail = ""
+    if mkt_iv is not None and fv is not None:
+        detail = f" Market ATM IV {mkt_iv*100:.1f}% vs forecast {fv*100:.1f}%."
+
+    if z >= gate:
+        st.caption(
+            f"Surface level: ATM IV screens **{surface}** vs the realized-vol forecast by "
+            f"{abs(level):.1f} vol pts (z={z:.1f} ≥ {gate:.1f}, significant).{detail}"
+        )
+    else:
+        st.caption(
+            f"Surface level: ATM IV is within noise of the realized-vol forecast "
+            f"({abs(level):.1f} vol pts, z={z:.1f} < {gate:.1f}) — treat the level signal as weak.{detail}"
+        )
+
+
 def display_interpretation(best_df: pd.DataFrame, action: str, forecast_vol: float) -> None:
     if best_df.empty:
         return
 
     top = best_df.iloc[0]
-    iv_minus_fv = top["Mkt IV (%)"] - forecast_vol * 100.0
     msg = (
         f"Top contract confidence {top['Confidence']:.0f}/100. "
-        f"Value edge {top['Value Edge (%)']:.1f}%. "
-        f"Spread {top['Spread (%)']:.1f}%. "
-        f"Market IV minus forecast vol {iv_minus_fv:.1f} vol points."
+        f"IV edge {top['IV Edge (vol pts)']:+.1f} vol pts (${top['$ Edge']:+,.0f}/contract). "
+        f"Relative-value edge {top['RV Edge (vol pts)']:+.1f} vol pts vs the fitted smile. "
+        f"Spread {top['Spread (%)']:.1f}%."
     )
 
     if action == "BUY":
-        msg = "Buy-side interpretation: positive edge means the contract screens cheap versus the forecast-vol model. " + msg
+        msg = "Buy-side: a positive IV edge means you pay less vol than fair (screens cheap). " + msg
     else:
-        msg = "Sell-side interpretation: positive edge means the contract screens rich versus the forecast-vol model. " + msg
+        msg = "Sell-side: a positive IV edge means you receive more vol than fair (screens rich). " + msg
 
     st.info(msg)
 
@@ -260,9 +309,12 @@ def display_headline_pick(ticker: str, action: str, option_family: str, best_df:
     exec_px = float(top["Exec Px"])
 
     metrics = []
-    edge = top["Value Edge (%)"]
+    edge = top["IV Edge (vol pts)"]
     if pd.notna(edge):
-        metrics.append(f"value edge {edge:+.1f}%")
+        metrics.append(f"IV edge {edge:+.1f} vol pts")
+    dollar_edge = top.get("$ Edge", np.nan)
+    if pd.notna(dollar_edge):
+        metrics.append(f"${dollar_edge:+,.0f}/contract")
     conf = top["Confidence"]
     if pd.notna(conf):
         metrics.append(f"confidence {conf:.0f}/100")
@@ -322,6 +374,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
     rv60 = vol_pack["rv60"]
     rv120 = vol_pack["rv120"]
     forecast_vol = vol_pack["forecast_vol"]
+    forecast_vol_uncertainty = vol_pack.get("forecast_vol_uncertainty")
 
     if forecast_vol is None or forecast_vol <= 0:
         st.error(f"{ticker}: could not build a valid forecast vol.")
@@ -382,21 +435,59 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 effective_forecast_vol = forecast_vol
                 ts_factor = None
                 earnings_adj_applied = False
+                earnings_move = None
 
                 if forecast_vol is not None:
+                    today_ny = datetime.now(NY_TZ).date()
+                    earnings_date_str = fundamentals.get("next_earnings_date")
+
+                    # Earnings jump: prefer the move implied by the IV term
+                    # structure; fall back to the configured default.
+                    if cfg.enable_earnings_vol_adj:
+                        earnings_move = implied_earnings_move_from_term_structure(
+                            term_df, earnings_date_str, today=today_ny
+                        )
+                        if earnings_move is None:
+                            earnings_move = cfg.expected_earnings_move
+
+                    # Diffusive term-structure scaling, with the earnings jump
+                    # stripped from the curve so it isn't double-counted when the
+                    # jump is added back per-expiry below.
                     if cfg.enable_term_structure_scaling and not term_df.empty:
-                        ts_factor = compute_term_structure_scaling_factor(term_df, target_date)
+                        earnings_dte = None
+                        if earnings_date_str:
+                            try:
+                                e_dt = datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+                                earnings_dte = (e_dt - today_ny).days
+                            except (ValueError, TypeError):
+                                earnings_dte = None
+                        jump_var = (earnings_move ** 2) if earnings_move else 0.0
+                        ts_factor = compute_term_structure_scaling_factor(
+                            term_df,
+                            target_dte=dte,
+                            earnings_dte=earnings_dte,
+                            jump_var=jump_var,
+                        )
                         if ts_factor is not None:
                             effective_forecast_vol = forecast_vol * ts_factor
 
-                    if cfg.enable_earnings_vol_adj:
+                    # Add the earnings jump back, but only for an expiry that
+                    # actually spans the earnings date.
+                    if cfg.enable_earnings_vol_adj and earnings_move:
                         effective_forecast_vol, earnings_adj_applied = adjust_forecast_vol_for_earnings(
                             forecast_vol=effective_forecast_vol,
                             T=T,
-                            earnings_date_str=fundamentals.get("next_earnings_date"),
+                            earnings_date_str=earnings_date_str,
                             expiration_date_str=target_date,
-                            expected_earnings_move=cfg.expected_earnings_move,
+                            expected_earnings_move=earnings_move,
                         )
+
+                # Scale the forecast uncertainty by the same level adjustment so
+                # the noise-gate z-score stays consistent with the adjusted vol.
+                eff_vol = effective_forecast_vol if effective_forecast_vol is not None else forecast_vol
+                eff_unc = forecast_vol_uncertainty
+                if forecast_vol_uncertainty is not None and forecast_vol not in (None, 0) and eff_vol is not None:
+                    eff_unc = forecast_vol_uncertainty * (eff_vol / forecast_vol)
 
                 best_df = screen_chain(
                     chain_df=chain_df,
@@ -407,8 +498,9 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                     dte=dte,
                     action=action,
                     option_family=option_family,
-                    forecast_vol=effective_forecast_vol if effective_forecast_vol is not None else forecast_vol,
+                    forecast_vol=eff_vol,
                     cfg=cfg,
+                    forecast_vol_uncertainty=eff_unc,
                 )
 
                 put_skew_df = build_skew_snapshot(chain_df, S, option_type="PUT")
@@ -417,6 +509,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
 
                 st.session_state[results_key] = {
                     "best_df": best_df,
+                    "scan_meta": best_df.attrs.get("scan_meta", {}),
                     "term_df": term_df,
                     "put_skew_df": put_skew_df,
                     "call_skew_df": call_skew_df,
@@ -499,6 +592,7 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
         return
 
     display_headline_pick(ticker, action, option_family, best_df, cached["expiration"])
+    display_level_signal(cached.get("scan_meta", {}), action)
     display_expected_moves(cached["S"], cached["T"], cached["forecast_vol"], best_df)
     display_interpretation(best_df, action, forecast_vol=cached["forecast_vol"])
 
@@ -510,7 +604,12 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
     # --- First tab: Top Contracts ---
     with tab_map["Top Contracts"]:
         st.subheader(f"Top Contracts | {ticker} | {action} {option_family} | {cached['expiration']}")
-        styled = style_results(best_df, action=action)
+        styled = style_results(
+            best_df,
+            action=action,
+            edge_green=cfg.iv_edge_green_volpts,
+            edge_red=cfg.iv_edge_red_volpts,
+        )
 
         st.dataframe(
             styled,
@@ -520,9 +619,12 @@ def process_ticker(ticker: str, action: str, option_family: str, cfg: ScannerCon
                 "Strike": st.column_config.NumberColumn("Strike", format="$ %.2f"),
                 "Bid": st.column_config.NumberColumn("Bid", format="$ %.2f"),
                 "Ask": st.column_config.NumberColumn("Ask", format="$ %.2f"),
-                "Value Edge (%)": st.column_config.NumberColumn("Value Edge (%)", format="%.1f%%"),
+                "IV Edge (vol pts)": st.column_config.NumberColumn("IV Edge (vol pts)", format="%.1f"),
+                "RV Edge (vol pts)": st.column_config.NumberColumn("RV Edge (vol pts)", format="%.1f"),
+                "$ Edge": st.column_config.NumberColumn("$ Edge", format="$ %.0f"),
                 "Spread (%)": st.column_config.NumberColumn("Spread (%)", format="%.1f%%"),
                 "Mkt IV (%)": st.column_config.NumberColumn("Mkt IV (%)", format="%.1f%%"),
+                "Fair IV (%)": st.column_config.NumberColumn("Fair IV (%)", format="%.1f%%"),
                 "Ann Yield (%)": st.column_config.NumberColumn("Ann Yield (%)", format="%.1f%%"),
                 "Confidence": st.column_config.NumberColumn("Confidence", format="%.0f"),
             },

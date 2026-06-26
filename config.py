@@ -42,17 +42,32 @@ class ScannerConfig:
     rv120_weight: float = 0.20
     vol_forecast_multiplier: float = 1.00
 
+    # Realized-vol estimator: "yang_zhang" (OHLC range-based, lower variance) or
+    # "close_close" (the original close-to-close fallback).
+    vol_estimator: str = "yang_zhang"
+
     enable_earnings_vol_adj: bool = True
-    expected_earnings_move: float = 0.05
+    expected_earnings_move: float = 0.05  # fallback when the term structure can't supply one
 
     enable_term_structure_scaling: bool = True
 
     use_executable_pricing: bool = True
     execution_slippage_pct: float = 0.0
 
-    confidence_weight_edge: float = 0.45
+    # --- Skew-aware fair value + vol-point edge ---
+    smile_fit_degree: int = 2        # quadratic smile in log-moneyness (level/slope/curvature)
+    min_smile_points: int = 5        # below this, fall back to a flat (skew-blind) fair vol
+    # Noise gating: how many forecast-vol std errors the level edge must clear to
+    # be treated as a real surface-level signal rather than estimation noise.
+    noise_gate_z: float = 1.0
+    # Vol-point thresholds for coloring the IV Edge column (green/red).
+    iv_edge_green_volpts: float = 2.0
+    iv_edge_red_volpts: float = -2.0
+
+    confidence_weight_edge: float = 0.40
+    confidence_weight_significance: float = 0.10
     confidence_weight_spread: float = 0.20
-    confidence_weight_oi: float = 0.15
+    confidence_weight_oi: float = 0.10
     confidence_weight_volume: float = 0.10
     confidence_weight_delta: float = 0.10
 
