@@ -198,6 +198,11 @@ def get_quote_and_history(ticker_symbol: str, history_days: int = 420) -> Dict[s
     hist = pd.DataFrame(rows)
     hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
     hist["close"] = pd.to_numeric(hist["close"], errors="coerce")
+    # Keep OHLC when present so range-based estimators (Yang-Zhang) can use it.
+    # These are optional: close-only history still works, just falls back to
+    # the close-to-close estimator downstream.
+    for col in ["open", "high", "low"]:
+        hist[col] = pd.to_numeric(hist[col], errors="coerce") if col in hist.columns else np.nan
     hist = hist.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
 
     if len(hist) < 130:
@@ -265,12 +270,18 @@ def get_option_chain(ticker_symbol: str, expiration: str) -> pd.DataFrame:
 
     if "greeks" in df.columns:
         df["mid_iv"] = df["greeks"].apply(lambda x: extract_greek(x, "mid_iv"))
+        # bid/ask IV let the edge compute in IV space with an honest executable
+        # haircut (pay ask_iv, receive bid_iv) instead of only the mid.
+        df["bid_iv"] = df["greeks"].apply(lambda x: extract_greek(x, "bid_iv"))
+        df["ask_iv"] = df["greeks"].apply(lambda x: extract_greek(x, "ask_iv"))
         df["delta_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "delta"))
         df["gamma_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "gamma"))
         df["theta_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "theta"))
         df["vega_mkt"] = df["greeks"].apply(lambda x: extract_greek(x, "vega"))
     else:
         df["mid_iv"] = np.nan
+        df["bid_iv"] = np.nan
+        df["ask_iv"] = np.nan
         df["delta_mkt"] = np.nan
         df["gamma_mkt"] = np.nan
         df["theta_mkt"] = np.nan
